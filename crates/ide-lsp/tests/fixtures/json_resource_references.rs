@@ -924,3 +924,164 @@ async fn registered_json_php_loading_retry_cannot_adopt_a_replacement_catalog_se
     assert!(result.is_err(), "the old preparation must not adopt a replacement session on retry: {result:?}");
     assert_eq!(state.requested("textDocument/hover").len(), 2, "reject before sending the old retry");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_retained_catalog_refreshes_after_edits_and_saves_without_a_php_request() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let path = h.root.join("catalogs/en.json");
+    let resource = path.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+        METHOD => Some(echo(params, resource.parent())),
+        "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+        _ => None,
+    }));
+    let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    let catalog = DocId::next();
+    h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+    h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap();
+    let updated = r#"{"Greeting 😀":"Updated without PHP action"}"#;
+    h.mgr.did_change(
+        catalog,
+        2,
+        &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: updated.into() }],
+        &|| updated.into(),
+    );
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(updated)).await;
+    assert_eq!(state.requested("textDocument/hover").len(), 1);
+    assert_eq!(state.requested(METHOD).len(), 2, "re-admit before forwarding an edited catalog");
+    h.mgr.did_save(catalog, updated);
+    h.mgr.php_files_changed(&[], std::slice::from_ref(&path), &[]);
+    eventually(|| {
+        state.requested(METHOD).len() == 3 && state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(updated)
+    })
+    .await;
+    assert_eq!(state.requested("textDocument/hover").len(), 1);
+    h.mgr.did_close(catalog);
+    eventually(|| !state.docs.lock().contains_key(&uri_of(&path))).await;
+    assert!(!path.exists());
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_background_refresh_retires_held_admission_and_yields_to_foreground_context() {
+    for change in ["edit", "foreground", "close", "disable", "restart"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let nested = h.root.join("packages/consumer");
+        std::fs::create_dir_all(&nested).unwrap();
+        let second_manifest = nested.join("composer.json");
+        std::fs::write(&second_manifest, MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move|state,method,params|match method {
+            METHOD=> {if state.requested(METHOD).len()==2 {held.hold();}Some(echo(params,(params["projectUri"]!=uri_of(&second_manifest)).then(||resource.parent().unwrap())))},
+            "textDocument/hover"=>Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+            _=>None,
+        }));
+        let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        let (other, _) = h.open("packages/consumer/Caller.php", "<?php __('Greeting 😀');");
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap();
+        let updated = r#"{"Greeting 😀":"Pending private value"}"#;
+        h.mgr.did_change(
+            catalog,
+            2,
+            &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: updated.into() }],
+            &|| updated.into(),
+        );
+        eventually(|| gate.entered()).await;
+        let latest = r#"{"Greeting 😀":"Latest private value"}"#;
+        match change {
+            "edit" => {
+                h.mgr.did_change(
+                    catalog,
+                    3,
+                    &[AppliedChange {
+                        range: rng(0, 0, 0, updated.encode_utf16().count() as u32),
+                        text: latest.into(),
+                    }],
+                    &|| latest.into(),
+                );
+                eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(latest)).await;
+            }
+            "foreground" => {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    h.mgr.hover(other, Pos::new(0, 10), Default::default()),
+                )
+                .await
+                .expect("foreground action must cancel the held background admission")
+                .unwrap()
+                .unwrap();
+                assert_eq!(result.contents.value, "disk");
+            }
+            "close" => h.mgr.did_close(catalog),
+            "disable" => h.mgr.set_execution_allowed(false),
+            "restart" => {
+                let server = h.mgr.servers().into_iter().find(|s| s.name == "phpantom").unwrap().id;
+                h.mgr.restart(server).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if change != "edit" {
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{change}");
+        }
+        assert!(
+            state.notified("textDocument/didOpen").iter().all(|params| params["textDocument"]["text"] != updated),
+            "{change}: stale text must not be shared"
+        );
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_background_refresh_waits_for_a_clean_manifest_without_spinning() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    let manifest = h.root.join("composer.json");
+    std::fs::write(&manifest, MANIFEST).unwrap();
+    let path = h.root.join("catalogs/en.json");
+    let resource = path.clone();
+    let gate = Arc::new(Gate::default());
+    let held = gate.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+        METHOD => {
+            if state.requested(METHOD).len() == 2 {
+                held.hold();
+            }
+            Some(echo(params, resource.parent()))
+        }
+        "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":"initial"}})),
+        _ => None,
+    }));
+    let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    let catalog = DocId::next();
+    h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+    h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap();
+    let updated = r#"{"Greeting 😀":"Recover without PHP action"}"#;
+    h.mgr.did_change(
+        catalog,
+        2,
+        &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: updated.into() }],
+        &|| updated.into(),
+    );
+    eventually(|| gate.entered()).await;
+    let composer = DocId::next();
+    h.mgr.did_open(composer, &manifest, &LanguageId::new("json"), 1, "{}");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(state.requested(METHOD).len(), 2);
+    assert!(!state.docs.lock().contains_key(&uri_of(&path)));
+    h.mgr.did_close(composer);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(updated)).await;
+    gate.open();
+    assert_eq!(state.requested("textDocument/hover").len(), 1);
+    h.mgr.shutdown_all().await;
+}

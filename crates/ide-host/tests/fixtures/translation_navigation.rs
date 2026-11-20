@@ -599,16 +599,60 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             assert_eq!(targets[0].path.to_path_buf(), path);
             assert_eq!(targets[0].range, key_range(overlay, "Greeting 😀"));
         }
-        let opens = std::fs::read_to_string(control.join("events.jsonl"))
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|event| {
-                event["method"] == "textDocument/didOpen" && event["uri"] == ide_lsp::path_to_uri_string(&path)
-            })
-            .count();
-        assert_eq!(opens, 1, "normal Host navigation reuses one admitted catalog");
+        let opens = || {
+            std::fs::read_to_string(control.join("events.jsonl"))
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|event| {
+                    event["method"] == "textDocument/didOpen" && event["uri"] == ide_lsp::path_to_uri_string(&path)
+                })
+                .count()
+        };
+        assert_eq!(opens(), 1, "normal Host navigation reuses one admitted catalog");
         f.project.documents.replace_all(catalog.id, updated).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while opens() != 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("managed edit must refresh before another PHP command");
+        let events_before_save = f.events.lock().unwrap().len();
+        f.project.documents.save(catalog.id).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+        let watched_path = ide_core::IpcPath::from(path.as_path());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let changed = f.events_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if f.events.lock().unwrap()[events_before_save..].iter().any(|event| {
+                    matches!(event, ide_core::IdeEvent::FsChanged { created, modified, .. }
+                        if created.iter().chain(modified).any(|path| path == &watched_path))
+                }) {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("the saved catalog must publish a new watcher event");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let events = std::fs::read_to_string(control.join("events.jsonl")).unwrap();
+                let last = events
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .rfind(|event| event["uri"] == ide_lsp::path_to_uri_string(&path));
+                if opens() >= 3 && last.as_ref().is_some_and(|event| event["method"] == "textDocument/didOpen") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("managed save must refresh after its watcher echo, before another PHP command");
         let hover = ide_host::ops::lsp::lsp_hover(
             &f.host,
             "main",
@@ -671,7 +715,7 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         .await
         .unwrap()
         .unwrap();
-        assert!(hover.contents.value.contains("Disk welcome"));
+        assert!(hover.contents.value.contains("Updated private value"));
         let reopened = f.project.documents.open(&path).unwrap();
         f.project.documents.replace_all(reopened.id, overlay).unwrap();
         let hover = ide_host::ops::lsp::lsp_hover(
@@ -702,7 +746,8 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         assert_eq!(refs.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
         assert_eq!(refs.locations[0].range, key_range(caller, "Greeting 😀"));
         for (name, text) in &extra {
-            assert_eq!(&std::fs::read_to_string(f.root.join(name)).unwrap(), text);
+            let expected = if name == "packages/billing/json/en.json" { updated } else { text };
+            assert_eq!(std::fs::read_to_string(f.root.join(name)).unwrap(), expected);
         }
         assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), caller);
     })

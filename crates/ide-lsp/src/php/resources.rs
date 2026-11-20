@@ -1,6 +1,8 @@
 use super::*;
 mod composer;
 mod references;
+mod refresh;
+pub(crate) use refresh::JsonRefreshKey;
 mod sync;
 use composer::ComposerInputs;
 

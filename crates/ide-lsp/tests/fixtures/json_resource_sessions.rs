@@ -293,6 +293,13 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         assert_eq!(count("textDocument/didClose"), 0, "retain the catalog after ordinary PHP navigation");
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;
         replace(&mgr, json, 2, OVERLAY, updated);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") != 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("edited catalog must refresh before another PHP request");
         let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
         assert!(hover.contents.value.contains("Updated private value"));
         assert!(!hover.contents.value.contains("Private overlay"));

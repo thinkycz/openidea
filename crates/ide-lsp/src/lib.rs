@@ -294,6 +294,8 @@ pub struct LspManager {
     reconfigure_lock: tokio::sync::Mutex<()>,
     php_json_resource_gate: tokio::sync::Mutex<()>,
     json_resource_count: AtomicU64,
+    json_refresh_publications: AtomicU64,
+    json_refreshes: Mutex<HashMap<php::JsonRefreshKey, Arc<CancellationToken>>>,
     json_catalog_revision: AtomicU64,
     json_preparation_changed: tokio::sync::watch::Sender<u64>,
     shutting_down: AtomicBool,
@@ -593,6 +595,8 @@ impl LspManager {
             reconfigure_lock: tokio::sync::Mutex::new(()),
             php_json_resource_gate: tokio::sync::Mutex::new(()),
             json_resource_count: AtomicU64::new(0),
+            json_refresh_publications: AtomicU64::new(0),
+            json_refreshes: Mutex::new(HashMap::new()),
             json_catalog_revision: AtomicU64::new(0),
             json_preparation_changed: tokio::sync::watch::channel(0).0,
             shutting_down: AtomicBool::new(false),
@@ -1433,6 +1437,7 @@ impl LspManager {
     pub fn did_change(&self, doc: DocId, version: u32, changes: &[AppliedChange], full_text: &dyn Fn() -> String) {
         let _gate = self.injections.gate.lock();
         let mut docs = self.docs.lock();
+        self.refresh_retained_json_document(&docs, doc);
         self.retire_json_resources_for_document(&mut docs, doc);
         let Some(d) = docs.get_mut(&doc) else { return };
         d.version = version as i32;
@@ -1540,6 +1545,7 @@ impl LspManager {
 
     pub fn did_save(&self, doc: DocId, text: &str) {
         let mut docs = self.docs.lock();
+        self.refresh_retained_json_document(&docs, doc);
         self.retire_json_resources_for_document(&mut docs, doc);
         let Some(d) = docs.get_mut(&doc) else { return };
         if d.text.as_str() != text {
@@ -1575,6 +1581,7 @@ impl LspManager {
     }
 
     fn close_document(&self, doc: DocId) {
+        self.cancel_json_refreshes_for_document(doc);
         self.go_mod_queries.lock().cancel(doc);
         let (d, compose_removed) = {
             let mut docs = self.docs.lock();
@@ -4803,6 +4810,7 @@ impl LspManager {
 
     pub async fn shutdown_all(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.cancel_json_refreshes(|_| true);
         self.go_mod_queries.lock().cancel_all();
         let _reconfigure = self.reconfigure_lock.lock().await;
         let servers: Vec<Arc<Server>> = self.servers.lock().clone();

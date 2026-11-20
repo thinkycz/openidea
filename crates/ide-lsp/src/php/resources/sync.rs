@@ -129,6 +129,7 @@ impl LspManager {
         {
             return Ok(());
         }
+        self.cancel_json_refreshes(|key| targets.iter().any(|target| target.server.id == key.server));
         let mut changed = self.json_preparation_changed.subscribe();
         let prepared = tokio::select! {
             biased;
@@ -168,18 +169,7 @@ impl LspManager {
         if catalogs.is_empty() {
             return self.finish_json_preparation(&selected, &catalogs, &[], revision, catalogs_revision).map(Some);
         }
-        let path = source.path.clone();
-        let boundary = self.project_root_for(&path);
-        let worker_cancel = cancel.clone();
-        let composer = tokio::select! {biased;()=cancel.cancelled()=>return Err(IdeError::cancelled()),result=tokio::task::spawn_blocking(move||{
-            physical_path(&path,false)?;
-            for directory in path.ancestors().skip(1).take_while(|directory|directory.starts_with(&boundary)) {
-                if worker_cancel.is_cancelled(){return Err(IdeError::cancelled());}
-                let manifest=directory.join("composer.json");
-                if std::fs::symlink_metadata(&manifest).is_ok(){return Ok(Some(manifest));}
-            }
-            Ok(None)
-        })=>result.map_err(|error|IdeError::internal(error.to_string()))??};
+        let composer = self.json_resource_manifest(source, cancel).await?;
         let Some(composer) = composer else {
             self.retire_json_resources_in(&mut self.docs.lock(), |doc, _, _, attached| {
                 catalogs.iter().any(|catalog| catalog.doc == doc)
@@ -271,6 +261,25 @@ impl LspManager {
             session.retain()?;
         }
         Ok(Some(prepared))
+    }
+
+    pub(super) async fn json_resource_manifest(
+        &self,
+        source: &DocSnap,
+        cancel: &CancellationToken,
+    ) -> IdeResult<Option<PathBuf>> {
+        let path = source.path.clone();
+        let boundary = self.project_root_for(&path);
+        let worker_cancel = cancel.clone();
+        tokio::select! {biased;()=cancel.cancelled()=>Err(IdeError::cancelled()),result=tokio::task::spawn_blocking(move||{
+            physical_path(&path,false)?;
+            for directory in path.ancestors().skip(1).take_while(|directory|directory.starts_with(&boundary)) {
+                if worker_cancel.is_cancelled(){return Err(IdeError::cancelled());}
+                let manifest=directory.join("composer.json");
+                if std::fs::symlink_metadata(&manifest).is_ok(){return Ok(Some(manifest));}
+            }
+            Ok(None)
+        })=>result.map_err(|error|IdeError::internal(error.to_string()))?}
     }
 
     fn finish_json_preparation(

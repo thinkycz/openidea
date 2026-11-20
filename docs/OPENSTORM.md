@@ -15,6 +15,82 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Retained catalog background refresh slice 214 (2026-11-21; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: editing or saving a previously admitted JSON catalog now queues
+a background refresh. It retires stale text immediately, debounces changes and
+revalidates the catalog against the same consuming Composer project and server
+generation. It uses a current PHP buffer whose nearest manifest matches that
+project. It never starts a server or admits a new catalog from an editor opening.
+
+Foreground PHP preparation and explicit JSON Find Usages cancel queued refreshes
+before waiting for admission. Document close, server stop, configuration/root
+changes, execution disable and shutdown cancel their affected tasks. Each queued
+identity carries its own cancellation token; an old task cannot erase a newer
+replacement. Waiting tasks hold weak manager references. Current-input failures
+wait for another input change rather than retrying on a timer. An in-flight
+metadata request is canceled before obsolete text can be forwarded.
+
+The first public regression observes no update after an edit without another PHP
+request. After implementing refresh, its save/watcher extension exposes another
+failure: the watcher echo cancels the save's pending refresh. File-change
+publication now retains refresh intents, retires managed sessions, and blocks
+new session admission while notifications are being published. Publication
+completion wakes waiting work. The inactive path avoids a document-map scan;
+ordinary settings and lifecycle retirement still cancel background work.
+
+All 62 focused JSON cases pass, including three new protocol groups: autonomous
+edit/save refresh with a watcher echo; superseding a held admission, foreground
+priority, close, disable and restart; and dirty-manifest waiting plus recovery
+without another PHP action. No stale pending catalog value is sent in those
+held-reply cases. Existing pure-query privacy, optional providers, context
+selection, JSON providers, stale replies and temporary-session checks remain.
+Two dependency builds were deliberately interrupted before tests while the
+watcher assertion and publication fix were completed. A third run was stopped
+early to require an event recorded after the save began; its partial results
+and all interruption logs are preserved. The final run uses the strengthened
+assertion with the same watcher and refresh deadlines. The first complete Rust
+run passed; Clippy then reported an unnecessary return in the extracted manifest
+helper. The redundant return was removed. The next Clippy pass requested rfind
+in the Host event lookup instead of filter plus next_back; that equivalent
+iterator form was applied. A QA-script reorder attempt failed on a dynamic path expression; the
+current run retains the original test-then-Clippy order. Both lint failures
+and the control-script failure remain recorded; final gates use current sources.
+
+The real-client case requires the updated JSON open frame before the next PHP
+hover. The managed Host case additionally saves its owned catalog, observes the
+actual file-watcher event, and waits for an open session after the watcher echo
+before another PHP command. Hover sees the updated value; closing the buffer
+then reads that saved disk value. The saved fixture file alone has its expected
+disk result advanced; other owned files and retained fixture originals remain
+unchanged. Unicode definitions, restart, reopen, references and shutdown remain
+checked through the existing actual client/Host paths and pinned Laravel 13.37.0.
+
+Fresh workspace executables reject query-only engine 187, then pass all 72 client
+and 62 Host cases on signed inactive engine 188. Source, Cargo fingerprint and
+binary witnesses match. Gates pass: Rust 5,593 / 260 ignored / the same 11
+documented exclusions; workspace all-target Clippy with warnings denied; Rust
+formatting; bindings fidelity; default-engine provenance; frontend 14,603 / eight
+skipped; types/lint/format/Knip; production build/Safari startup; 59 controlled
+browser cases. Debug linking emits the same 13 large-unwind-table warnings as
+slice 213; no new warning class is observed. Native GUI checks remain
+user-skipped. No engine/app is promoted.
+
+The latest 134-case regression set replaces the previous
+1,273,254,576-byte payload. Cargo cleanup: Removed 19655 files, 27.4GiB total.
+Removed frontend dist (73,745,139 bytes). The sole signed App 119,
+default engine 185, engine provenance, historical receipts and both stashes remain
+preserved. Normal commit, push and remote read-back are recorded in the ignored
+acceptance receipt. All 69 areas remain visible at 67 partial/two user-deferred.
+
+Next: new-catalog discovery and reconciliation across PHP buffer changes,
+configuration/root changes and server restart; wider nested consumers and
+separate-server package-provider overlays; multiple-positive-consumer acceptance
+before promotion/packaging. This slice retains prior admission intent; it does
+not discover new catalog/project pairs. Large-catalog performance, broader
+physical/service matrices and native UI remain unverified. Evidence:
+artifacts/checks/slice214/{gates,frontend-gates,evaluation,focused-real-host,
+frozen-runtimes,retention}.json and retained failure/interruption logs.
+
 Automatic PHP catalog overlays slice 213 (2026-11-20; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: ordinary PHP requests now prepare eligible open custom JSON
 translation catalogs before asking the selected PHPantom server. Current positive

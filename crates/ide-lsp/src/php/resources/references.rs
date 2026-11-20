@@ -97,6 +97,7 @@ impl LspManager {
     }
 
     pub(crate) fn retire_json_resources(&self) {
+        self.cancel_json_refreshes(|_| true);
         self.invalidate_json_preparation();
         if self.json_resource_count.load(Ordering::Acquire) != 0 {
             self.retire_json_resources_in(&mut self.docs.lock(), |_, _, _, _| true);
@@ -104,6 +105,7 @@ impl LspManager {
     }
 
     pub(crate) fn retire_json_resources_for_server(&self, server: ide_core::ServerId) {
+        self.cancel_json_refreshes(|key| key.server == server);
         if self.json_resource_count.load(Ordering::Acquire) != 0 {
             self.retire_json_resources_in(&mut self.docs.lock(), |_, _, _, attached| attached.server.id == server);
         }
@@ -194,6 +196,7 @@ impl LspManager {
             || self.project_files_revision.load(Ordering::Acquire) != receipt.sources.files_revision
             || !self.execution_allowed.load(Ordering::Acquire)
             || self.shutting_down.load(Ordering::Acquire)
+            || self.json_refresh_publications.load(Ordering::Acquire) != 0
             || !supports_resources(&target.caps())
             || target.server.running_gen(target.run.generation).is_none()
         {
@@ -247,6 +250,7 @@ impl LspManager {
         include_declaration: bool,
         cancel: &CancellationToken,
     ) -> IdeResult<Option<References>> {
+        self.cancel_json_refreshes_for_document_path(&snap.path);
         let _selection = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(IdeError::cancelled()),

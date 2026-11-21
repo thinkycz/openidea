@@ -15,6 +15,47 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Shared-consumer background preparation slice 230 (source/client accepted):
+FEAT-031/066/067/068: when no JSON catalog is open, background recovery prepares
+statically declared provider buffers for the live Composer contexts sharing one
+PHP peer. Previously this path refused more than one consuming context. Bounded
+rounds retain temporary ownership across queries and recheck every context after
+later provider copies change server inputs. Publication retains the existing
+manifest, source, capability, cancellation and physical-owner checks. Metadata-only
+queries remain content-free; unrelated buffers stay private.
+
+The manager regression first times out on the unchanged implementation. All ten
+provider-sync mock cases then pass, including two-consumer edits/restoration and
+restart without PHP navigation, stale/canceled preparations, invalid owners,
+legacy capability boundaries and checked foreground ownership. The actual signed
+191/Laravel13.37 fixture passes automatic two-consumer preparation and restart,
+metadata-only barriers proving current dirty provider digests, A/B/A hover results,
+class withdrawal/restoration, last-consumer retirement, unchanged disk originals,
+private-buffer exclusion and owned engine process exit. The first real fixture
+observation interrupted unfinished preparation with foreground navigation; its
+trace and failure remain under initial-real. The corrected fixture waits on the
+existing content-free metadata gate, with no sleep or relaxed result expectation.
+
+Fresh workspace tests pass 5,632 with 263 ignored and the same eleven
+HTTP-confirmation/direnv exclusions. Workspace all-target Clippy with warnings
+denied, Rust formatting and all137 freshly compiled current client/Host cases on
+active signed191 pass. Frontend types/lint/format/Knip,14,603 tests/eight existing
+skips, production build/Safari compatibility and17 controlled Laravel browser
+flows pass. The unchanged engine's source acceptance remains source226 evidence.
+
+The latest six accepted regression executables replace the older payload only
+after validation; their launches/counts verify after compiler cleanup. Removed
+compiler output: Removed 19677 files, 27.6GiB total. Frontend dist removal:
+73,745,139 bytes. App120/default191, source pins,
+licenses, WIT and both stashes remain unchanged. This source change is not yet in
+App120. Native GUI stays user-skipped; installation, notarization, publishing,
+updater activation and debugger expansion stay deferred. Broader provider graphs,
+new unsaved files/untitled first-save, concurrent project/configuration cases,
+performance and remaining roadmap acceptance remain open. All69 areas retain67
+partial/two user-deferred states. Evidence: artifacts/checks/slice230/{gates,
+real,evaluation,frozen-runtimes,retention,retained-runtime-lists}.json and logs.
+Normal commit/push and remote equality are recorded in the delivery receipt.
+
 Package slice 229 (2026-11-21; local development App120 accepted):
 OpenStorm 0.1.120 bundles the exact signed engine191 accepted in source226 and
 current client228. It delivers catalog-origin usages, custom catalog/provider

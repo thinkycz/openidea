@@ -430,9 +430,12 @@ async fn json_provider_sync_keeps_only_current_live_consumers_on_a_shared_peer()
     *h.launcher.state_for_root("phpantom", &shared).caps.lock() = incremental_caps();
     let first = shared.join("First.php");
     let second = shared.join("Second.php");
+    let mut provider_docs = Vec::new();
     for path in [&first, &second] {
         std::fs::write(path, PROVIDER).unwrap();
-        h.mgr.did_open(DocId::next(), path, &h.lang, 1, DIRTY);
+        let doc = DocId::next();
+        h.mgr.did_open(doc, path, &h.lang, 1, DIRTY);
+        provider_docs.push(doc);
     }
     let (_, private) = h.open("shared/Private.php", "<?php /* unrelated private */");
     let (a, _) = h.open("apps/a/Caller.php", CALLER);
@@ -461,6 +464,36 @@ async fn json_provider_sync_keeps_only_current_live_consumers_on_a_shared_peer()
         }
     }));
     start.open();
+    eventually(|| {
+        let docs = target.docs.lock();
+        docs.get(&uri_of(&first)).is_some_and(|text| text == DIRTY)
+            && docs.get(&uri_of(&second)).is_some_and(|text| text == DIRTY)
+    })
+    .await;
+    assert!(target.requested("textDocument/hover").is_empty(), "prepare every consumer before navigation");
+    for (old, new, version) in [(DIRTY, PROVIDER, 2), (PROVIDER, DIRTY, 3)] {
+        for doc in &provider_docs {
+            h.mgr.did_change(
+                *doc,
+                version,
+                &[AppliedChange { range: rng(0, 0, 0, old.encode_utf16().count() as u32), text: new.into() }],
+                &|| new.into(),
+            );
+        }
+        eventually(|| {
+            let docs = target.docs.lock();
+            [&first, &second].iter().all(|path| docs.get(&uri_of(path)).is_some_and(|text| text == new))
+        })
+        .await;
+    }
+    let server = h.mgr.servers().iter().find(|server| *server.root == h.root).unwrap().id;
+    h.mgr.restart(server).await.unwrap();
+    eventually(|| {
+        let docs = target.docs.lock();
+        [&first, &second].iter().all(|path| docs.get(&uri_of(path)).is_some_and(|text| text == DIRTY))
+    })
+    .await;
+    assert!(target.requested("textDocument/hover").is_empty(), "edits and restart must recover without navigation");
     for caller in [a, b, a] {
         assert_eq!(
             h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap().unwrap().contents.value,

@@ -6,6 +6,34 @@ pub(super) fn supported(caps: &ServerCaps) -> bool {
 }
 
 impl LspManager {
+    pub(super) async fn prepare_provider_contexts(
+        &self,
+        contexts: &[(PathBuf, DocSnap)],
+        target: &Target,
+        cancel: &CancellationToken,
+    ) -> IdeResult<Vec<PhpJsonTranslationResource>> {
+        let mut opened = Vec::new();
+        for _ in 0..=8 {
+            let revision = target.server.resource_revision.load(Ordering::Acquire);
+            let mut receipts = Vec::new();
+            for (manifest, source) in contexts {
+                let probe = source.path.with_extension("json");
+                let mut receipt = self.json_resource_on_target(manifest, &probe, source, target, cancel).await?;
+                opened.append(&mut receipt.provider_sessions);
+                receipts.push(receipt);
+            }
+            // Sharing a later consumer's dependencies invalidates earlier receipts.
+            // Hold temporary ownership until every context agrees on unchanged inputs.
+            if target.server.resource_revision.load(Ordering::Acquire) == revision {
+                if let Some(receipt) = receipts.first_mut() {
+                    receipt.provider_sessions = opened;
+                }
+                return Ok(receipts);
+            }
+        }
+        Err(IdeError::unavailable("Shared provider preparation exceeds the synchronization bound"))
+    }
+
     // One PHP peer can serve several live Composer projects. Revalidate their
     // existing ownership before withdrawing a previously admitted provider copy.
     pub(super) async fn reconcile_provider_sources(

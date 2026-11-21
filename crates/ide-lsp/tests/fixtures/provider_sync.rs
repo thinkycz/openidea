@@ -335,6 +335,46 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
         mgr.did_open(provider, &source, &LanguageId::new("php"), 7, &dirty);
         mgr.did_open(second_provider, &second_source, &LanguageId::new("php"), 1, &second_dirty);
         mgr.did_open(second_caller, &second_path, &LanguageId::new("php"), 1, SECOND_CALLER);
+        until_events(&control, |log| {
+            [(&source, 7, &dirty), (&second_source, 1, &second_dirty)].iter().all(|(path, version, text)| {
+                log[group_start..].iter().any(|event| {
+                    event_at(event, &app, "textDocument/didOpen", path)
+                        && event["version"] == *version
+                        && event["sha256"] == format!("{:x}", Sha256::digest(text.as_bytes()))
+                })
+            })
+        })
+        .await;
+        assert!(
+            !events(&control)[group_start..].iter().any(|event| event["method"] == "textDocument/hover"),
+            "every shared-peer consumer must prepare before another PHP action"
+        );
+        let restart_start = events(&control).len();
+        let server = mgr.servers().iter().find(|server| *server.root == app).unwrap().id;
+        mgr.restart(server).await.unwrap();
+        until_events(&control, |log| {
+            [&source, &second_source].iter().all(|path| {
+                log[restart_start..].iter().any(|event| event_at(event, &app, "textDocument/didOpen", path))
+            })
+        })
+        .await;
+        // Content-free queries wait for the active preparation gate without canceling it.
+        for (manifest, path, text) in [
+            (app.join("composer.json"), &source, &dirty),
+            (app.join("consumer/composer.json"), &second_source, &second_dirty),
+        ] {
+            let receipt = mgr
+                .php_json_translation_resource_from_composer(&manifest, &original_path, Default::default())
+                .await
+                .unwrap();
+            let sources = receipt.provider_sources().unwrap();
+            assert!(!sources.incomplete());
+            assert!(sources.providers.iter().any(|provider| {
+                provider.path == *path && provider.sha256_utf8 == <[u8; 32]>::from(Sha256::digest(text.as_bytes()))
+            }));
+        }
+        assert!(!events(&control)[restart_start..].iter().any(|event| event["method"] == "textDocument/hover"));
+        let navigation_start = events(&control).len();
         for (doc, text, expected) in [
             (caller, CALLER, "Disk alternate"),
             (second_caller, SECOND_CALLER, "Disk B alternate"),
@@ -349,7 +389,7 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
         for path in [&source, &second_source] {
             assert!(log[group_start..].iter().any(|event| event_at(event, &app, "textDocument/didOpen", path)));
             assert!(
-                !log[group_start..].iter().any(|event| event_at(event, &app, "textDocument/didClose", path)),
+                !log[navigation_start..].iter().any(|event| event_at(event, &app, "textDocument/didClose", path)),
                 "switching live contexts must keep checked provider ownership"
             );
         }

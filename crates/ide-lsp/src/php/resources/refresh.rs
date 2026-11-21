@@ -263,8 +263,8 @@ impl LspManager {
         {
             return;
         }
-        // One stable consumer anchors recovery; provider text still requires a
-        // fresh declared-source receipt before it can cross server boundaries.
+        // One stable document anchors discovery of all consuming contexts.
+        // Provider text still requires a fresh declared-source receipt.
         let doc = docs
             .iter()
             .filter(|(_, doc)| {
@@ -428,14 +428,16 @@ impl LspManager {
         if contexts.is_empty() {
             return Ok(true);
         }
-        if provider_only && contexts.len() != 1 {
-            return Ok(false);
-        }
-        let resource_path = if provider_only { catalog.path.with_extension("json") } else { catalog.path.clone() };
-        let mut receipts = Vec::new();
-        for (manifest, source) in &contexts {
-            receipts.push(self.json_resource_on_target(manifest, &resource_path, source, &target, cancel).await?);
-        }
+        let resource_path = catalog.path.clone();
+        let mut receipts = if provider_only {
+            self.prepare_provider_contexts(&contexts, &target, cancel).await?
+        } else {
+            let mut receipts = Vec::new();
+            for (manifest, source) in &contexts {
+                receipts.push(self.json_resource_on_target(manifest, &resource_path, source, &target, cancel).await?);
+            }
+            receipts
+        };
         for receipt in &receipts {
             self.php_json_translation_resource_current(receipt, cancel.clone()).await?;
         }

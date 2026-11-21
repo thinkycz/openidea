@@ -1,5 +1,21 @@
 use super::*;
 
+struct ResumeCatalogDiscovery<'a> {
+    manager: &'a LspManager,
+    path: &'a Path,
+    doc: Option<DocId>,
+}
+
+impl Drop for ResumeCatalogDiscovery<'_> {
+    fn drop(&mut self) {
+        let Some(doc) = self.doc else { return };
+        let current = self.manager.docs.lock().get(&doc).is_some_and(|source| source.path == self.path);
+        if current {
+            self.manager.discover_json_document(doc);
+        }
+    }
+}
+
 pub(super) struct ResourceSession<'a> {
     manager: &'a LspManager,
     target: Target,
@@ -253,6 +269,16 @@ impl LspManager {
         include_declaration: bool,
         cancel: &CancellationToken,
     ) -> IdeResult<Option<References>> {
+        // Drop the selection lock before resuming ordinary catalog discovery.
+        let _resume = ResumeCatalogDiscovery {
+            manager: self,
+            path: &snap.path,
+            doc: self
+                .docs
+                .lock()
+                .iter()
+                .find_map(|(id, doc)| (doc.path == snap.path && doc.uri == snap.uri).then_some(*id)),
+        };
         self.cancel_json_refreshes_for_document_path(&snap.path);
         let _selection = tokio::select! {
             biased;

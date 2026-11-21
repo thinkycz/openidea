@@ -789,6 +789,35 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             assert_eq!(targets[0].range, key_range(overlay, "Greeting 😀"));
         }
         assert_eq!(opens(), opens_before_navigation, "normal Host navigation reuses the current admitted catalog");
+        let before_find_usages = opens();
+        let references = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            catalog.id,
+            key_range(overlay, "Greeting 😀").start,
+            false,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(references.incomplete.is_none());
+        assert_eq!(references.locations.len(), 1);
+        assert_eq!(references.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
+        assert_eq!(references.locations[0].range, key_range(caller, "Greeting 😀"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while opens() < before_find_usages + 2
+                || !frames().last().is_some_and(|event| {
+                    event["method"] == "textDocument/didOpen" && event["version"] == private_version
+                })
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Host Find Usages restores its managed catalog before PHP navigation");
         let bootstrap = f.root.join("bootstrap/providers.php");
         let original_bootstrap = extra.iter().find(|(name, _)| name == "bootstrap/providers.php").unwrap().1.as_str();
         let dependency_frames = || {

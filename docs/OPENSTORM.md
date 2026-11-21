@@ -15,6 +15,75 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Find Usages catalog recovery slice 224 (2026-11-21; client/Host accepted; candidate 189 inactive):
+FEAT-031/066/067: project-wide Find Usages now resumes ordinary catalog discovery
+when it exits after canceling background discovery or retiring a retained JSON
+overlay. A scope guard captures the managed document identity before cancellation.
+It runs after the selection lock is released, including error and cancellation
+exits. Recovery uses current consumer projects, capabilities, server generations,
+buffer contents and Composer witnesses. It does not reuse the request's receipt.
+A closed/replaced document or disabled execution cannot resurrect the overlay.
+Explicit sessions without an active PHP consumer retain their temporary lifetime.
+
+The focused regression fails on the previous client because the retained catalog
+stays closed after Find Usages. The new regression group passes for success,
+server error, cancellation, JSON edits, close, execution revocation, server
+restart, dirty Composer/discard, repeated requests, an already-canceled second
+request and a foreground hover while references are held.
+Cancellation and edits retire the held operation before its reply is released;
+recovery uses the current JSON text exactly once. Closed/disabled catalogs receive
+no replacement open. Foreground hover keeps priority. All 85 JSON protocol cases
+pass; these synthetic registration decisions establish client boundaries.
+
+A new real-engine regression uses two separate server processes and two Laravel
+projects registering the same physical catalog outside both application roots.
+It validates PHP syntax, Composer JSON, the retained Laravel 13.37 vendor version
+and each app's FileLoader/Translator runtime result before client assertions.
+Both servers admit the private JSON buffer before PHP navigation. Find Usages
+returns both callers at their UTF-16 key ranges. The previous client then fails
+because neither overlay returns. Review exposed a second race: a quick repeat
+cancels pending recovery before a replacement overlay exists. A guard limited to
+previously retained attachments fails that repeated-request case in both mock
+and real client tests. The final guard resumes all canceled ordinary discovery.
+The two-server fixture now repeats Find Usages before waiting and requires both
+current overlays to return before another PHP command.
+Subsequent hover reuses those overlays, unsaved JSON edits reach both servers,
+server identities/PIDs stay fixed, disk JSON stays unchanged, and close retires
+both overlays. The managed Host fixture now also calls its actual Find Usages
+command and requires its current-version overlay to return before PHP navigation.
+
+Fresh workspace executables pass all 73 client and 62 Host cases on signed
+inactive engine 189 and reject query-only engine 187. Source, executable and Cargo
+fingerprint witnesses match. Retained fixture originals remain unchanged. Engine
+189, its source pin and patch bytes are unchanged, so slice 223's full engine
+18,744-pass/17-ignored, Clippy and reproducible-build evidence is reused; this slice
+does not claim a new engine build. Default engine 185 and the sole signed App 119
+remain unchanged. Native GUI checks remain user-skipped; no app is promoted.
+
+Fresh gates pass: Rust 5,618 / 261 ignored / the same 11 documented exclusions;
+workspace all-target Clippy with warnings denied; Rust formatting; bindings
+fidelity; default-engine provenance; frontend 14,603 / eight skipped;
+types/lint/format/Knip; production build/Safari compatibility; and 59 controlled
+browser cases. Dev/test debug information is disabled and test symbols stripped
+only for the temporary disk-budget profile. Clippy's intermediate output is
+removed before the workspace test build. Debug linking reports 13 instances of
+the existing large-unwind-table warning class. No performance parity is claimed.
+
+The latest 135-case regression payload replaces the previous
+875,734,640-byte payload. Final Cargo cleanup:
+Removed 10028 files, 16.7GiB total. Frontend dist (73,745,139 bytes) is
+removed. All six retained executables launch and list their expected cases after
+cleanup. Earlier source/provenance/evaluation assets and both stashes are preserved.
+Normal commit, push and remote read-back are recorded in the ignored acceptance
+receipt. All 69 areas remain visible at 67 partial/two user-deferred.
+
+Next: broader closed/nested consumers, shared provider buffers across separate
+servers, catalogs registered by several contexts within one server, and promotion.
+Concurrent cross-server foreground requests, wider physical/service matrices,
+large-catalog performance and native UI remain unverified. Evidence:
+artifacts/checks/slice224/{gates,frontend-gates,evaluation,real-red,real-repeat-red,real-final-green,
+frozen-runtimes,retention,retained-runtime-lists}.json, red.log, repeat-red.log and green-final-json.log.
+
 External dependency catalog recovery slice 223 (2026-11-21; client/Host accepted; candidate 189 inactive):
 FEAT-031/066/067: PHP file-change publication now rediscovers existing JSON
 catalogs after its watcher notifications. Discovery uses every current active

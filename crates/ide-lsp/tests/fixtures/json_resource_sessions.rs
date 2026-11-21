@@ -572,3 +572,181 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom 189, owned PHP and Laravel 13.37 vendor fixture"]
+async fn shared_json_find_usages_restores_both_consuming_servers_without_php_navigation() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor"))
+        .canonicalize()
+        .unwrap();
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(vendor.join("composer/installed.json")).unwrap()).unwrap();
+    assert!(
+        installed["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|package| package["name"] == "laravel/framework" && package["version"] == "v13.37.0")
+    );
+    let engine = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").expect("pinned PHPantom"))
+        .canonicalize()
+        .unwrap();
+    let php = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHP_BIN").expect("owned PHP"));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let provider = PROVIDER.replace("../packages/billing/json", "../../shared/catalogs");
+    for project in ["a", "b"] {
+        for (name, text) in [
+            ("composer.json", COMPOSER),
+            ("app/Caller.php", CALLER),
+            ("app/Provider.php", provider.as_str()),
+            ("bootstrap/providers.php", "<?php return [App\\Provider::class];"),
+        ] {
+            let path = root.join(project).join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            if name.ends_with(".php") {
+                let lint = std::process::Command::new(&php).args(["-n", "-l"]).arg(&path).output().unwrap();
+                assert!(lint.status.success(), "{project}/{name}: {}", String::from_utf8_lossy(&lint.stderr));
+            } else {
+                serde_json::from_str::<serde_json::Value>(text).unwrap();
+            }
+        }
+        std::os::unix::fs::symlink(&vendor, root.join(project).join("vendor")).unwrap();
+        std::fs::create_dir(root.join(project).join("control")).unwrap();
+        std::fs::write(root.join(project).join("control/methods.json"), "[]").unwrap();
+    }
+    let path = root.join("shared/catalogs/en.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, CATALOG).unwrap();
+    serde_json::from_str::<serde_json::Value>(CATALOG).unwrap();
+    serde_json::from_str::<serde_json::Value>(OVERLAY).unwrap();
+    for project in ["a", "b"] {
+        let runtime = std::process::Command::new(&php)
+            .args(["-n", "-d", "zend.assertions=1", "-d", "assert.exception=1", "-r", r#"require $argv[1].'/vendor/autoload.php'; $loader=new Illuminate\Translation\FileLoader(new Illuminate\Filesystem\Filesystem,$argv[1].'/lang'); $loader->addJsonPath($argv[1].'/../shared/catalogs'); $translator=new Illuminate\Translation\Translator($loader,'en'); assert($translator->get('Greeting 😀')==='Disk welcome');"#])
+            .arg(root.join(project))
+            .output()
+            .unwrap();
+        assert!(runtime.status.success(), "{project}: {}", String::from_utf8_lossy(&runtime.stderr));
+    }
+    let proxy = root.join("json-session-replies.py");
+    std::fs::write(&proxy, include_str!("phpantom-json-session-replies.py")).unwrap();
+    let mut language = route_handler_language(&engine);
+    let cfg = &mut language.language_servers[0];
+    let args = std::mem::take(&mut cfg.args);
+    cfg.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    cfg.args = vec![
+        "-I".into(),
+        proxy.to_string_lossy().into_owned(),
+        engine.to_string_lossy().into_owned(),
+        "control".into(),
+    ];
+    cfg.args.extend(args);
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![language])), Arc::new(|_| {}));
+    mgr.set_content_roots(vec![root.join("a"), root.join("b")]);
+    let frames = |project: &str| {
+        std::fs::read_to_string(root.join(project).join("control/events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["uri"] == ide_lsp::path_to_uri_string(&path))
+            .collect::<Vec<_>>()
+    };
+    let opens =
+        |project: &str| frames(project).iter().filter(|event| event["method"] == "textDocument/didOpen").count();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let catalog = DocId::next();
+        mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, OVERLAY);
+        assert!(mgr.servers().is_empty());
+        let callers = [DocId::next(), DocId::next()];
+        for (project, caller) in ["a", "b"].into_iter().zip(callers) {
+            mgr.did_open(caller, &root.join(project).join("app/Caller.php"), &LanguageId::new("php"), 1, CALLER);
+        }
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while opens("a") == 0 || opens("b") == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both consuming servers admit the shared private catalog before PHP navigation");
+        let servers = mgr.servers();
+        assert_eq!(servers.len(), 2);
+        assert!(servers.iter().all(|server| server.pid.is_some()));
+        assert_ne!(servers[0].pid, servers[1].pid);
+        let identities: Vec<_> = servers.into_iter().map(|server| (server.id, server.root, server.pid)).collect();
+        for caller in callers {
+            let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
+            assert!(hover.contents.value.contains("Private overlay"));
+        }
+        let before = [opens("a"), opens("b")];
+        for _ in 0..2 {
+            let refs =
+                mgr.references(catalog, pos(OVERLAY, "Greeting 😀"), false, true, Default::default()).await.unwrap();
+            assert!(refs.incomplete.is_none(), "{refs:?}");
+            let mut found: Vec<_> = refs.locations.iter().map(|location| location.path.to_path_buf()).collect();
+            found.sort();
+            assert_eq!(found, [root.join("a/app/Caller.php"), root.join("b/app/Caller.php")]);
+            assert!(refs.locations.iter().all(|location| location.range.start == pos(CALLER, "Greeting 😀")));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if ["a", "b"].into_iter().enumerate().all(|(i, project)| {
+                    opens(project) >= before[i] + 3
+                        && frames(project)
+                            .last()
+                            .is_some_and(|event| event["method"] == "textDocument/didOpen" && event["version"] == 1)
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Find Usages restores both persistent catalogs before another PHP command");
+        let restored = [opens("a"), opens("b")];
+        for caller in callers {
+            let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
+            assert!(hover.contents.value.contains("Private overlay"));
+        }
+        assert_eq!([opens("a"), opens("b")], restored, "PHP navigation reuses both restored catalogs");
+        let updated = r#"{"Greeting 😀":"Updated shared private value"}"#;
+        replace(&mgr, catalog, 2, OVERLAY, updated);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !["a", "b"].into_iter().all(|project| {
+                frames(project)
+                    .last()
+                    .is_some_and(|event| event["method"] == "textDocument/didOpen" && event["version"] == 2)
+            }) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("subsequent JSON edits refresh both consuming servers");
+        for caller in callers {
+            let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
+            assert!(hover.contents.value.contains("Updated shared private value"));
+        }
+        for (id, root, pid) in identities {
+            let current = mgr.servers().into_iter().find(|server| server.id == id).unwrap();
+            assert_eq!((current.root, current.pid), (root, pid));
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), CATALOG);
+        mgr.did_close(catalog);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !["a", "b"]
+                .into_iter()
+                .all(|project| frames(project).last().is_some_and(|event| event["method"] == "textDocument/didClose"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("closing the catalog retires both consuming overlays");
+    })
+    .catch_unwind()
+    .await;
+    mgr.shutdown_all().await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}

@@ -6,6 +6,156 @@ const MANIFEST: &str = r#"{"require":{"laravel/framework":"13.37.0"}}"#;
 const TEXT: &str = r#"{"Greeting 😀":"Private draft"}"#;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn registered_json_find_usages_restores_retained_catalogs_without_php_navigation() {
+    for action in [
+        "success",
+        "repeat",
+        "pre-cancel",
+        "error",
+        "cancel",
+        "edit",
+        "close",
+        "disable",
+        "restart",
+        "composer",
+        "foreground",
+    ] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let state = h.launcher.state("phpantom");
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+            METHOD => Some(echo(params, resource.parent())),
+            "textDocument/references" => { held.hold(); Some(json!([])) },
+            "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+            _ => None,
+        }));
+        if action == "error" {
+            let held = gate.clone();
+            state.fault.lock().replace(Arc::new(move |_, method| {
+                (method == "textDocument/references").then(|| {
+                    held.hold();
+                    (-32001, "owned test failure".into())
+                })
+            }));
+        }
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        let opens = || {
+            state
+                .notified("textDocument/didOpen")
+                .iter()
+                .filter(|event| event["textDocument"]["uri"] == uri_of(&path))
+                .count()
+        };
+        let before = opens();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let manager = h.mgr.clone();
+        let refs = tokio::spawn(async move { manager.references(catalog, Pos::new(0, 2), false, true, token).await });
+        eventually(|| gate.entered()).await;
+        let updated = r#"{"Greeting 😀":"Latest private buffer"}"#;
+        let manifest_doc = DocId::next();
+        match action {
+            "cancel" => cancel.cancel(),
+            "edit" => h.mgr.did_change(
+                catalog,
+                2,
+                &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: updated.into() }],
+                &|| updated.into(),
+            ),
+            "close" => h.mgr.did_close(catalog),
+            "disable" => h.mgr.set_execution_allowed(false),
+            "restart" => {
+                h.mgr.restart(h.mgr.servers().iter().find(|s| s.name == "phpantom").unwrap().id).await.unwrap();
+            }
+            "composer" => h.mgr.did_open(
+                manifest_doc,
+                &h.root.join("composer.json"),
+                &LanguageId::new("json"),
+                1,
+                r#"{"require":{"laravel/framework":"13.37.0"},"extra":{"dirty":true}}"#,
+            ),
+            "foreground" => {
+                let hover = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    h.mgr.hover(caller, Pos::new(0, 10), Default::default()),
+                )
+                .await
+                .expect("foreground hover must not wait for held references")
+                .unwrap()
+                .unwrap();
+                assert_eq!(hover.contents.value, TEXT);
+            }
+            _ => {}
+        }
+        if !matches!(action, "success" | "repeat" | "pre-cancel" | "error" | "foreground") {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !refs.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("retire references before releasing the held reply");
+        }
+        gate.open();
+        let result = refs.await.unwrap();
+        if matches!(action, "success" | "repeat" | "pre-cancel" | "foreground") {
+            assert!(result.unwrap().locations.is_empty());
+        } else {
+            assert!(result.is_err(), "{action}");
+        }
+        if action == "repeat" {
+            assert!(
+                h.mgr
+                    .references(catalog, Pos::new(0, 2), false, true, Default::default())
+                    .await
+                    .unwrap()
+                    .locations
+                    .is_empty()
+            );
+        } else if action == "pre-cancel" {
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            assert!(h.mgr.references(catalog, Pos::new(0, 2), false, true, cancelled).await.is_err());
+        }
+        let expected_opens = before + if action == "repeat" { 3 } else { 2 };
+        if action == "composer" {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "dirty Composer prevents readmission");
+            h.mgr.did_close(manifest_doc);
+        }
+        if action == "close" || action == "disable" {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(opens(), before + 1, "{action}: do not resurrect a closed or disabled catalog");
+        } else {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while opens() < expected_opens
+                    || state.docs.lock().get(&uri_of(&path)).map(String::as_str)
+                        != Some(if action == "edit" { updated } else { TEXT })
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{action}: ordinary catalog discovery must resume after Find Usages"));
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(opens(), expected_opens, "{action}: one current restored overlay");
+        }
+        assert_eq!(state.requested("textDocument/hover").len(), usize::from(action == "foreground"));
+        assert_eq!(state.launches.load(Ordering::SeqCst), if action == "restart" { 2 } else { 1 });
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn registered_json_external_changes_recheck_every_consuming_context_before_readmission() {
     let mut capabilities = caps();
     capabilities["experimental"]["phpWorkbenchRenameChecked"] = json!(true);

@@ -4,6 +4,7 @@
 Run the affected source gates first. This command does not install, publish,
 notarize or launch the app. Configure Cargo/pnpm in PATH before running it.
 """
+import argparse
 import datetime
 import json
 import os
@@ -22,7 +23,7 @@ def run(*args, **kwargs):
     subprocess.run(args, cwd=ROOT, check=True, **kwargs)
 
 
-def main():
+def main(*, defer_prune=False):
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise RuntimeError('This recipe targets Apple Silicon macOS')
     version = json.loads((ROOT / 'package.json').read_text())['version']
@@ -66,16 +67,21 @@ def main():
             str(destination), '--profile', 'development', stdout=stream)
     # Retain the prior app until the new signature and receipt have succeeded.
     # Save the deletion inventory alongside the current receipt.
-    with (destination.parent / 'retention.json').open('x') as stream:
-        run(sys.executable, str(ROOT / 'scripts/prune-openstorm-builds.py'), '--apply', stdout=stream)
+    if not defer_prune:
+        with (destination.parent / 'retention.json').open('x') as stream:
+            run(sys.executable, str(ROOT / 'scripts/prune-openstorm-builds.py'), '--apply', stdout=stream)
     shutil.rmtree(source)  # Avoid keeping a second copy of the same signed archive.
     # All source gates have finished and the signed archive is self-contained.
     # Keep their receipts, not test binaries/objects from previous version builds.
     run('cargo', 'clean', '--target-dir', str(target), env=env)
     print(json.dumps({'bundle': str(destination), 'receipt': str(receipt),
                       'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      'installed': False, 'notarized': False}))
+                      'installed': False, 'notarized': False,
+                      'prune_deferred': defer_prune}))
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--defer-prune', action='store_true',
+                        help='Keep the prior app until separate embedded acceptance succeeds')
+    main(defer_prune=parser.parse_args().defer_prune)

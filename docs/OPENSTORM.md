@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 229 (2026-11-21; local development App120 accepted):
+OpenStorm 0.1.120 bundles the exact signed engine191 accepted in source226 and
+current client228. It delivers catalog-origin usages, custom catalog/provider
+synchronization, single-context background recovery and checked foreground
+ownership across live Composer consumers. All75 current client and62 Host cases
+pass against the actual embedded executable with retained228 source/binary/
+fingerprint witnesses; only47 local Cargo package versions change. Standalone
+navigation verifies13 positive cases/seven negative controls,17 exact references
+and now17 catalog-declaration-origin references, plus dirty sources, diagnostics,
+restart and graceful exits. Four configured-PHP route/view cases pass. Laravel
+13.37 reference checks pass121 syntax files/387 runtime assertions/exactly three
+intentional analyzer diagnostics. Seventeen controlled-backend browser flows pass.
+
+Fresh type/lint/format/Knip, all14,603 frontend tests/eight existing skips,
+production build/Safari compatibility,24 version/provenance tests, ten packaging/
+retention tests, Rust formatting, three resource tests, resource all-target
+Clippy, active pin replay/checksum and app build pass. Reuse228 application
+workspace5,632/263ignored/the same11 exclusions/all-target workspaceClippy and137
+client-Host, with source code matched apart from local version metadata. Unchanged
+engine191 source226 verification (18,748/17ignored, both releaseClippy variants,
+production/signed provenance) is reused separately, not reported as newly run.
+
+A new explicit deferred-pruning mode keeps App119 through all embedded checks.
+Its regression fails before the option exists and passes after it is implemented;
+default packaging behavior is retained. Actual app-library and executable rustc
+arguments now prove debug assertions disabled for normal application cfg; only
+allowlisted compiler metadata is recorded, with no environment values. Bundle
+identity/version, arm64 architecture, source/build receipts, active engine
+provenance/licenses, source/binary identity witnesses and post-probe deep/strict
+ad-hoc signature pass. No main application is launched: native runtime identity,
+menus, keyboard/focus, platform/service, installation and relaunch remain untested.
+
+After embedded acceptance, prior App119, duplicate staging/compiler output and
+73,745,139 frontend bytes are removed. Compiler cleanup:
+13717 files, 8.6GiB total. Only App120 remains, alongside the one latest
+retained regression payload and earlier source/provenance/evaluation evidence.
+Both stashes remain. Historical candidate191 stays marked inactive, while bundled
+191 is active. No installation, migration, notarization, publication, automatic
+updates or debugger expansion is performed. All69 areas remain67 partial/two
+user-deferred. Source/shared-consumer background preparation, broader graphs,
+performance, native acceptance and the rest of the roadmap remain active.
+Evidence: artifacts/checks/slice229/{post-package,compiler-witness,reused-evidence,
+client-host,fixture-runtime,wire,packaged-navigation}.json and
+artifacts/batches/0.1.120/{build-receipt,retention}.json. Normal commit/push and
+remote read-back are recorded in the ignored delivery receipt.
+
 Checked shared-peer provider ownership slice 228 (2026-11-21; client/Host accepted):
 FEAT-031/066/067/068: switching Composer consumers on a shared PHP peer no
 longer automatically closes another live consumer's checked provider buffers.

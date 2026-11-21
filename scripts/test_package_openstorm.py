@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import os
+import plistlib
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -44,6 +46,47 @@ class PackagingBoundaryTests(unittest.TestCase):
         self.version('../outside')
         with self.assertRaisesRegex(RuntimeError, 'numeric'):
             package.main()
+
+    def test_deferred_pruning_keeps_prior_app_until_embedded_acceptance(self):
+        prior = self.root / 'artifacts/batches/0.1.53/OpenStorm.app'
+        prior.mkdir(parents=True)
+        sentinel = prior / 'keep'
+        sentinel.write_text('prior accepted app')
+        target = self.root / 'artifacts/build'
+        source = target / 'debug/bundle/macos/OpenStorm.app'
+        destination = self.root / 'artifacts/batches/0.1.54/OpenStorm.app'
+        commands = []
+
+        def run(*args, **kwargs):
+            commands.append(args)
+            if args[0] == 'pnpm':
+                (source / 'Contents/MacOS').mkdir(parents=True)
+                (source / 'Contents/MacOS/openidea').write_bytes(b'owned fixture')
+                (source / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+                    'CFBundleIdentifier': 'cz.thinky.openstorm',
+                    'CFBundleShortVersionString': '0.1.54',
+                    'CFBundleExecutable': 'openidea',
+                }))
+            elif args[0] == 'ditto':
+                shutil.copytree(args[1], args[2])
+            elif args[0] == 'codesign':
+                return
+            elif 'openstorm-build-receipt.py' in args[1]:
+                kwargs['stdout'].write('{"signature_verification":true}\n')
+            elif args[:2] == ('cargo', 'clean'):
+                shutil.rmtree(target)
+            else:
+                self.fail(f'Unexpected command: {args}')
+
+        with patch.object(package, 'run', side_effect=run), \
+                patch.object(package.subprocess, 'check_output', return_value='arm64\n'):
+            package.main(defer_prune=True)
+        self.assertEqual(sentinel.read_text(), 'prior accepted app')
+        self.assertTrue(destination.is_dir())
+        self.assertTrue((destination.parent / 'build-receipt.json').is_file())
+        self.assertFalse((destination.parent / 'retention.json').exists())
+        self.assertFalse(source.exists())
+        self.assertEqual(commands[-1][:2], ('cargo', 'clean'))
 
     def test_symlinked_archives_cannot_write_outside_root(self):
         outside = self.root / 'outside'

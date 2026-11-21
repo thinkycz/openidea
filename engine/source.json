@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "4c61b99d2b042c652d164528438f6faba233a70e3dcbd6b8df8659a1057eb251",
-  "version": "0.11.1-openstorm.185",
+  "patches_sha256": "f7531cedd978e86a6590459704bf774bf210f5926145ea67964e682bcabdf74d",
+  "version": "0.11.1-openstorm.191",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -744,6 +744,30 @@
     {
       "file": "0185-view-only-typed-receiver-demand.patch",
       "sha256": "49306655670e6ae558f26cccb6137aa81874ff0283f48ad3244aeca8fc96ae04"
+    },
+    {
+      "file": "0186-translation-catalog-declaration-references.patch",
+      "sha256": "ef3d9cd42beeffab871cd3f454c804c9c1bf7e004ad253165967ebdf2f0546bb"
+    },
+    {
+      "file": "0187-json-translation-resource-admission.patch",
+      "sha256": "4af739ad94bca506f9cd7f50694fc8cbff1621106681ab3569e2ae021b7c2472"
+    },
+    {
+      "file": "0188-registered-json-buffer-routing.patch",
+      "sha256": "7e9a91fdf36daf2a4892bf0621992fe08609217341463affa427e009f334c84d"
+    },
+    {
+      "file": "0189-closed-provider-list-refresh.patch",
+      "sha256": "1838cab8aae45361c9e7d82a1c1f9d143e3b605ca7ead98a0dcf33b68dd63905"
+    },
+    {
+      "file": "0190-provider-source-receipts.patch",
+      "sha256": "e1410306f5b4fe6a4a02cf107da02d93cfd516be8fc9b9c8891bee2822e960af"
+    },
+    {
+      "file": "0191-provider-source-withdrawal.patch",
+      "sha256": "48aaa2d9cb00fcc0b79d576143474bedbf24f1271879010866f35ad41149b9ae"
     }
   ]
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getIndentation } from "@codemirror/language";
+import { ensureSyntaxTree, getIndentation, syntaxTreeAvailable } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { findLanguageDescription, loadSupport } from "./languages";
 
@@ -43,7 +43,10 @@ describe("vue language mode", () => {
       ".a { color: red; }",
       "</style>",
     ].join("\n");
-    const state = EditorState.create({ doc, extensions: [support!, EditorState.tabSize.of(2)] });
+    let state = EditorState.create({ doc, extensions: [support!, EditorState.tabSize.of(2)] });
+    expect(ensureSyntaxTree(state, state.doc.length)).not.toBeNull();
+    state = state.update({}).state;
+    expect(syntaxTreeAvailable(state, state.doc.length)).toBe(true);
     const indent = (line: number) => getIndentation(state, state.doc.line(line).from);
     expect(indent(2)).toBe(2);
     expect(indent(6)).toBe(0);

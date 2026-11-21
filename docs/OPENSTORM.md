@@ -15,6 +15,29 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Vue indentation test readiness repair (2026-11-21; test-only):
+The first slice228 frontend run reports 14,602 passed/eight skipped and one
+unchanged Vue indentation assertion failure: closing script indentation is two
+instead of zero. A controlled initial parse-budget cutoff reproduces the exact
+prior passing assertions and failure at twelve cut points; the tree is incomplete.
+Completing syntax and adopting it through an empty state transaction restores all
+six expected indentation values. The existing test now verifies complete syntax
+before its original indentation assertions. No timeout is increased, and the Vue
+implementation and application behavior are unchanged.
+
+The controlled copy of the original test fails at the intended indentation
+assertion; the same copy with readiness checks passes all three Vue tests. Fresh
+frontend types/lint/format/Knip, all 14,603 tests/eight skips, production build/
+Safari compatibility and 59 browser cases pass after the repair. Original failed
+logs and exact RED/GREEN probe sources/results remain in slice228 artifacts.
+The unchanged committed Rust source matches every slice227 runtime-source hash,
+so its accepted workspace/Clippy evidence is reused for this test-only commit.
+The in-progress PHP ownership changes are preserved separately. Native GUI stays
+user-skipped; App119/default185 and whole-area statuses are unchanged. This
+repairs the test precondition, not an independently observed native Vue defect.
+Evidence: artifacts/checks/slice228/{vue-readiness-regression,frontend-gates}.json,
+vue-cutoff-probe.json and frontend-initial/.
+
 Provider recovery without open catalogs slice 227 (2026-11-21; client/Host accepted):
 FEAT-031/066/067/068: declared provider buffers now recover in the background
 when no translation JSON document is open. A stable primary PHP document anchors

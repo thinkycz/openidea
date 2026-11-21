@@ -131,10 +131,11 @@ struct Attached {
     server: Arc<Server>,
     /// Instance generation the document was `didOpen`ed on, if any.
     opened_gen: Option<u64>,
-    resource: Option<JsonResourceAttachment>,
+    resource: Option<PhpResourceAttachment>,
 }
 
-struct JsonResourceAttachment {
+struct PhpResourceAttachment {
+    provider: bool,
     selector: PathBuf,
     cancel: CancellationToken,
     witness: Arc<php::JsonResourceWitness>,

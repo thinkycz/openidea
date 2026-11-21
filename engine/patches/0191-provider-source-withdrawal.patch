@@ -1,0 +1,392 @@
+--- a/src/backend/laravel/provider_resources.rs
++++ b/src/backend/laravel/provider_resources.rs
+@@ -87,13 +87,18 @@
+             fqn: fqn.to_string(),
+             origin,
+         });
+-        let resources = crate::virtual_members::laravel::extract_provider_resources(
+-            content,
+-            &file_path,
+-            &workspace_root,
+-            self.provider_class_context(fqn),
+-            std::sync::Arc::clone(&identity),
+-        );
++        let resources = self
++            .provider_class_context(fqn)
++            .map(|context| {
++                crate::virtual_members::laravel::extract_provider_resources(
++                    content,
++                    &file_path,
++                    &workspace_root,
++                    context,
++                    std::sync::Arc::clone(&identity),
++                )
++            })
++            .unwrap_or_default();
+         Some((identity, resources))
+     }
+ 
+@@ -250,41 +255,53 @@
+             return;
+         }
+ 
+-        let known = {
++        // Composer may have loaded this source through a spelling containing
++        // `..` or a symlink. Withdrawal must replace every contribution for the
++        // preferred physical source, even when it no longer declares the FQN.
++        let mut aliases = self.symbols.source_authority.aliases(uri);
++        aliases.insert(uri.to_owned());
++        let known: Vec<_> = {
+             let scans = self.laravel_provider_scans.read();
+             scans
+-                .scan_for(uri)
+-                .map(|scan| (scan.identity.fqn.clone(), scan.identity.origin))
+-        };
+-        let Some((fqn, origin)) = known else {
+-            // A registered provider whose class could not be resolved when the
+-            // full scan ran, because the file is written after the list that
+-            // names it.  It joins the table the moment it parses.
++                .scans_for_uris(&aliases)
++                .map(|scan| (scan.uri.clone(), std::sync::Arc::clone(&scan.identity)))
++                .collect()
++        };
++        if known.is_empty() {
+             if self.declares_registered_provider(uri) {
+                 self.build_provider_resources(providers.get());
+             }
+             return;
+-        };
+-
+-        let Some((identity, resources)) =
+-            self.scan_provider_resources(uri, Some(content), &fqn, origin)
+-        else {
+-            return;
+-        };
+-
++        }
++        let mut updates = Vec::new();
++        for (source, previous) in known {
++            let Some((identity, resources)) =
++                self.scan_provider_resources(uri, Some(content), &previous.fqn, previous.origin)
++            else {
++                return;
++            };
++            updates.push((source, previous, identity, resources));
++        }
+         let merged = {
+             let mut scans = self.laravel_provider_scans.write();
+-            // An edit that leaves the registrations alone (any edit outside
+-            // them, which is most of them) changes nothing downstream, so the
+-            // derived caches are left intact.
+-            if scans
+-                .scan_for(uri)
+-                .is_some_and(|scan| scan.resources == resources && scan.identity == identity)
+-            {
++            if updates.iter().any(|(source, previous, _, _)| {
++                scans
++                    .scan_for(source)
++                    .is_none_or(|scan| scan.identity != *previous)
++            }) {
+                 return;
+             }
+-            if !scans.replace(uri, identity, resources) {
++            if updates.iter().all(|(source, _, identity, resources)| {
++                scans
++                    .scan_for(source)
++                    .is_some_and(|scan| scan.resources == *resources && scan.identity == *identity)
++            }) {
+                 return;
++            }
++            for (source, _, identity, resources) in updates {
++                if !scans.replace(&source, identity, resources) {
++                    return;
++                }
+             }
+             scans.merged()
+         };
+@@ -325,12 +342,15 @@
+     /// registers.  Only the base resolution is used: the virtual member
+     /// providers add nothing a declared constant is read from, and one of them
+     /// is the very table being built here.
+-    fn provider_class_context(&self, fqn: &str) -> crate::virtual_members::laravel::ClassContext {
+-        let Some(class) = self.find_or_load_class(fqn) else {
+-            return Default::default();
+-        };
++    fn provider_class_context(
++        &self,
++        fqn: &str,
++    ) -> Option<crate::virtual_members::laravel::ClassContext> {
++        let class = self.find_or_load_class(fqn)?;
+         let loader = |name: &str| self.find_or_load_class(name);
+         let merged = crate::inheritance::resolve_class_with_inheritance(&class, &loader);
+-        crate::virtual_members::laravel::ClassContext::from_class(&merged)
++        Some(crate::virtual_members::laravel::ClassContext::from_class(
++            &merged,
++        ))
+     }
+ }
+--- a/src/virtual_members/laravel/provider_resources.rs
++++ b/src/virtual_members/laravel/provider_resources.rs
+@@ -336,6 +336,15 @@
+         self.scans.iter().find(|scan| scan.uri == uri)
+     }
+ 
++    pub fn scans_for_uris<'a>(
++        &'a self,
++        uris: &'a std::collections::HashSet<String>,
++    ) -> impl Iterator<Item = &'a ProviderScan> {
++        self.scans
++            .iter()
++            .filter(move |scan| uris.contains(&scan.uri))
++    }
++
+     /// Replace one provider's registrations, leaving every other scan in
+     /// place.  Returns `false` when the provider is no longer part of the
+     /// table (a rebuild raced this refresh).
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -298,7 +298,7 @@
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, (crate::workbench_translation_resources::CAPABILITY): true, (crate::workbench_translation_resources::BUFFER_CAPABILITY): true, (crate::workbench_translation_resources::PROVIDER_SOURCES_CAPABILITY): true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, (crate::workbench_translation_resources::CAPABILITY): true, (crate::workbench_translation_resources::BUFFER_CAPABILITY): true, (crate::workbench_translation_resources::PROVIDER_SOURCES_CAPABILITY): true, "phpWorkbenchProviderSourceSync": true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+--- a/tests/provider_source_receipts.rs
++++ b/tests/provider_source_receipts.rs
+@@ -67,10 +67,9 @@
+         serde_json::json!(["Missing\\Provider"])
+     );
+     assert_eq!(value["providerSources"]["limited"], false);
+-    assert_eq!(
+-        init.capabilities.experimental.unwrap()["phpWorkbenchProviderSources"],
+-        true
+-    );
++    let experimental = init.capabilities.experimental.unwrap();
++    assert_eq!(experimental["phpWorkbenchProviderSources"], true);
++    assert_eq!(experimental["phpWorkbenchProviderSourceSync"], true);
+     let dirty = PROVIDER.replace("../json", "../alternate");
+     router
+         .did_open(DidOpenTextDocumentParams {
+@@ -94,6 +93,30 @@
+     assert_eq!(
+         negative["providerSources"]["providers"][0]["sha256"],
+         format!("{:x}", Sha256::digest(dirty.as_bytes()))
++    );
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: Url::from_file_path(&provider).unwrap(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: "<?php namespace Shared; class Other {}".into(),
++            }],
++        })
++        .await;
++    let withdrawn = router
++        .workbench_json_translation_resource(TranslationResourceQuery {
++            project_uri: project.clone(),
++            resource_uri: resource.clone(),
++        })
++        .await
++        .unwrap();
++    assert!(
++        withdrawn.root_uri.is_none(),
++        "an unsaved provider withdrawal must not restore its disk registration: {withdrawn:?}"
+     );
+     assert_eq!(std::fs::read_to_string(&provider).unwrap(), PROVIDER);
+     assert!(!resource.to_file_path().unwrap().exists());
+@@ -188,3 +211,188 @@
+     assert!(reply.provider_sources.limited);
+     router.shutdown().await.unwrap();
+ }
++
++#[tokio::test]
++async fn provider_reopen_withdrawal_does_not_restore_cached_disk_translations() {
++    let temp = tempfile::tempdir().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    let app = root.join("app");
++    let source = root.join("shared/src/Provider.php");
++    let caller = app.join("Caller.php");
++    let caller_text = "<?php __('Greeting');";
++    for (path, text) in [
++        (
++            app.join("composer.json"),
++            r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"Shared\\":"../shared/src/"}}}"#,
++        ),
++        (
++            app.join("bootstrap/providers.php"),
++            "<?php return [Shared\\Provider::class];",
++        ),
++        (
++            root.join("shared/composer.json"),
++            r#"{"name":"fixture/shared","autoload":{"psr-4":{"Shared\\":"src/"}}}"#,
++        ),
++        (source.clone(), PROVIDER),
++        (
++            root.join("shared/json/en.json"),
++            r#"{"Greeting":"Disk original"}"#,
++        ),
++        (
++            root.join("shared/alternate/en.json"),
++            r#"{"Greeting":"Disk alternate"}"#,
++        ),
++        (caller.clone(), caller_text),
++    ] {
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(path, text).unwrap();
++    }
++    let router = ProjectRouter::new_test_with_full_stubs();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&app).unwrap()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::from_file_path(&caller).unwrap(),
++                language_id: "php".into(),
++                version: 1,
++                text: caller_text.into(),
++            },
++        })
++        .await;
++    let query = TranslationResourceQuery {
++        project_uri: Url::from_file_path(app.join("composer.json")).unwrap(),
++        resource_uri: Url::from_file_path(root.join("shared/json/en.json")).unwrap(),
++    };
++    assert!(
++        router
++            .workbench_json_translation_resource(query.clone())
++            .await
++            .unwrap()
++            .root_uri
++            .is_some()
++    );
++    let hover = || HoverParams {
++        text_document_position_params: TextDocumentPositionParams {
++            text_document: TextDocumentIdentifier {
++                uri: Url::from_file_path(&caller).unwrap(),
++            },
++            position: Position::new(0, 12),
++        },
++        work_done_progress_params: Default::default(),
++    };
++    let initial = format!("{:?}", router.hover(hover()).await.unwrap());
++    assert!(
++        initial.contains("Disk original"),
++        "fixture must recognize the translation helper: {initial}"
++    );
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::from_file_path(&source).unwrap(),
++                language_id: "php".into(),
++                version: 1,
++                text: PROVIDER.replace("../json", "../alternate"),
++            },
++        })
++        .await;
++    assert!(
++        router
++            .workbench_json_translation_resource(query.clone())
++            .await
++            .unwrap()
++            .root_uri
++            .is_none()
++    );
++    assert!(format!("{:?}", router.hover(hover()).await.unwrap()).contains("Disk alternate"));
++    router
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: Url::from_file_path(&source).unwrap(),
++            },
++        })
++        .await;
++    assert!(
++        router
++            .workbench_json_translation_resource(query.clone())
++            .await
++            .unwrap()
++            .root_uri
++            .is_some()
++    );
++    assert!(format!("{:?}", router.hover(hover()).await.unwrap()).contains("Disk original"));
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::from_file_path(&source).unwrap(),
++                language_id: "php".into(),
++                version: 2,
++                text: "<?php namespace Shared; class Other {}".into(),
++            },
++        })
++        .await;
++    let receipt = router
++        .workbench_json_translation_resource(query.clone())
++        .await
++        .unwrap();
++    assert!(
++        receipt.root_uri.is_none(),
++        "removed provider class must withdraw its catalog root: {receipt:?}"
++    );
++    let result = format!("{:?}", router.hover(hover()).await.unwrap());
++    assert!(
++        !result.contains("Disk original") && !result.contains("Disk alternate"),
++        "removed provider must not resurrect cached disk values: {result}"
++    );
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: Url::from_file_path(&source).unwrap(),
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: PROVIDER.replace("class Provider", "class Other"),
++            }],
++        })
++        .await;
++    assert!(
++        router
++            .workbench_json_translation_resource(query.clone())
++            .await
++            .unwrap()
++            .root_uri
++            .is_none(),
++        "another class's boot method cannot register resources for the removed provider"
++    );
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: Url::from_file_path(&source).unwrap(),
++                version: 4,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: PROVIDER.into(),
++            }],
++        })
++        .await;
++    assert!(
++        router
++            .workbench_json_translation_resource(query.clone())
++            .await
++            .unwrap()
++            .root_uri
++            .is_some()
++    );
++    assert!(format!("{:?}", router.hover(hover()).await.unwrap()).contains("Disk original"));
++    router.shutdown().await.unwrap();
++}

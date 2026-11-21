@@ -205,6 +205,40 @@ impl LspManager {
         }
     }
 
+    pub(super) fn queue_provider_catalog_refreshes(
+        &self,
+        docs: &HashMap<DocId, DocState>,
+        path: &Path,
+        canonical: &Path,
+    ) {
+        let mut seen = HashSet::new();
+        for source in docs.values() {
+            for attached in &source.servers {
+                let Some(resource) = &attached.resource else { continue };
+                let Some(generation) = attached.opened_gen else { continue };
+                if !resource.persistent || resource.cancel.is_cancelled() {
+                    continue;
+                }
+                let dependent = (resource.provider && (source.path == path || source.canonical == canonical))
+                    || resource.witness.provider_sources.as_ref().is_some_and(|sources| {
+                        sources.providers.iter().any(|provider| provider.path == path || provider.path == canonical)
+                    });
+                if !dependent || !seen.insert((attached.server.id, generation, resource.selector.clone())) {
+                    continue;
+                }
+                for (doc, catalog) in docs {
+                    if Self::json_catalog_path(&catalog.path, &catalog.uri, &catalog.language) {
+                        self.queue_json_refresh(
+                            JsonRefreshKey { doc: *doc, server: attached.server.id, generation },
+                            attached.server.clone(),
+                            Some(resource.selector.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn queue_json_refresh(&self, key: JsonRefreshKey, server: Arc<Server>, project: Option<PathBuf>) {
         let cancel = Arc::new(CancellationToken::new());
         if let Some(previous) = self.json_refreshes.lock().insert(key, cancel.clone()) {
@@ -345,6 +379,22 @@ impl LspManager {
             .enumerate()
             .filter_map(|(index, receipt)| receipt.root.is_some().then_some(index))
             .collect();
+        if positive.is_empty() {
+            for (path, manifest) in &manifests {
+                if self.json_resource_manifest(path, cancel).await? != *manifest {
+                    return Err(IdeError::cancelled());
+                }
+            }
+            if cancel.is_cancelled() || *self.json_preparation_changed.borrow() != inputs.revision {
+                return Err(IdeError::cancelled());
+            }
+            let mut opened = Vec::new();
+            for receipt in &mut receipts {
+                opened.append(&mut receipt.provider_sessions);
+            }
+            references::ResourceSession::retain_all(opened)?;
+            return Ok(false);
+        }
         let [selected] = positive.as_slice() else { return Ok(false) };
         let mut receipt = if contexts.len() > 1 {
             let (manifest, source) = &contexts[*selected];
@@ -377,6 +427,9 @@ impl LspManager {
         receipt: &mut PhpJsonTranslationResource,
         inputs: &JsonInputSnapshot,
     ) -> IdeResult<()> {
-        self.open_json_session(catalog, receipt, inputs)?.retain()
+        let session = self.open_json_session(catalog, receipt, inputs)?;
+        let mut opened = std::mem::take(&mut receipt.provider_sessions);
+        opened.push(session);
+        references::ResourceSession::retain_all(opened)
     }
 }

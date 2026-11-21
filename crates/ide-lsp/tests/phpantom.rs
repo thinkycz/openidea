@@ -8,6 +8,10 @@ use ide_text::AppliedChange;
 use parking_lot::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+#[cfg(unix)]
+#[path = "fixtures/provider_sync.rs"]
+mod provider_sync;
+
 #[path = "fixtures/provider_sources.rs"]
 mod provider_sources;
 

@@ -16,8 +16,8 @@ impl Drop for ResumeCatalogDiscovery<'_> {
     }
 }
 
-pub(super) struct ResourceSession<'a> {
-    manager: &'a LspManager,
+pub(super) struct ResourceSession {
+    manager: std::sync::Weak<LspManager>,
     target: Target,
     doc: DocId,
     cancel: CancellationToken,
@@ -25,38 +25,61 @@ pub(super) struct ResourceSession<'a> {
     pub(super) witness: Arc<JsonResourceWitness>,
 }
 
-impl ResourceSession<'_> {
-    pub(super) fn retain(mut self) -> IdeResult<()> {
-        let mut docs = self.manager.docs.lock();
-        let resource = docs
-            .get_mut(&self.doc)
-            .and_then(|doc| {
-                doc.servers.iter_mut().find(|attached| {
-                    attached.server.id == self.target.server.id
-                        && attached.opened_gen == Some(self.target.run.generation)
-                })
+impl ResourceSession {
+    pub(super) fn retain_all(mut sessions: Vec<Self>) -> IdeResult<()> {
+        let Some(first) = sessions.first() else { return Ok(()) };
+        let manager = first.manager.upgrade().ok_or_else(IdeError::cancelled)?;
+        let mut docs = manager.docs.lock();
+        if !manager.execution_allowed.load(Ordering::Acquire)
+            || manager.shutting_down.load(Ordering::Acquire)
+            || sessions.iter().any(|session| {
+                session.cancel.is_cancelled()
+                    || !std::sync::Weak::ptr_eq(&session.manager, &first.manager)
+                    || session.target.server.running_gen(session.target.run.generation).is_none()
+                    || !docs.get(&session.doc).is_some_and(|doc| {
+                        doc.servers.iter().any(|attached| {
+                            attached.server.id == session.target.server.id
+                                && attached.opened_gen == Some(session.target.run.generation)
+                                && attached.resource.as_ref().is_some_and(|resource| {
+                                    !resource.cancel.is_cancelled()
+                                        && (!resource.provider || provider_sync::supported(&session.target.caps()))
+                                        && Arc::ptr_eq(&resource.witness, &session.witness)
+                                })
+                        })
+                    })
             })
-            .and_then(|attached| attached.resource.as_mut())
-            .ok_or_else(IdeError::cancelled)?;
-        if resource.cancel.is_cancelled() || self.cancel.is_cancelled() {
+        {
             return Err(IdeError::cancelled());
         }
-        resource.persistent = true;
-        self.retained = true;
+        for session in &mut sessions {
+            let resource = docs
+                .get_mut(&session.doc)
+                .and_then(|doc| {
+                    doc.servers.iter_mut().find(|attached| {
+                        attached.server.id == session.target.server.id
+                            && attached.opened_gen == Some(session.target.run.generation)
+                    })
+                })
+                .and_then(|attached| attached.resource.as_mut())
+                .expect("validated resource session");
+            resource.persistent = true;
+            session.retained = true;
+        }
         Ok(())
     }
 
     fn finish(self, receipt: &mut PhpJsonTranslationResource) -> IdeResult<()> {
-        let mut docs = self.manager.docs.lock();
+        let manager = self.manager.upgrade().ok_or_else(IdeError::cancelled)?;
+        let mut docs = manager.docs.lock();
         if self.cancel.is_cancelled()
             || !LspManager::navigation_documents_current(&docs, &self.target, &receipt.sources)
-            || self.manager.project_files_revision.load(Ordering::Acquire) != receipt.sources.files_revision
+            || manager.project_files_revision.load(Ordering::Acquire) != receipt.sources.files_revision
             || self.target.server.running_gen(self.target.run.generation).is_none()
-            || !self.manager.execution_allowed.load(Ordering::Acquire)
+            || !manager.execution_allowed.load(Ordering::Acquire)
         {
             return Err(IdeError::cancelled());
         }
-        self.manager.retire_json_resources_in(&mut docs, |doc, _, _, attached| {
+        manager.retire_json_resources_in(&mut docs, |doc, _, _, attached| {
             doc == self.doc
                 && attached.server.id == self.target.server.id
                 && attached.opened_gen == Some(self.target.run.generation)
@@ -69,12 +92,13 @@ impl ResourceSession<'_> {
     }
 }
 
-impl Drop for ResourceSession<'_> {
+impl Drop for ResourceSession {
     fn drop(&mut self) {
         if self.retained {
             return;
         }
-        self.manager.retire_json_resources_in(&mut self.manager.docs.lock(), |doc, _, _, attached| {
+        let Some(manager) = self.manager.upgrade() else { return };
+        manager.retire_json_resources_in(&mut manager.docs.lock(), |doc, _, _, attached| {
             doc == self.doc
                 && attached.server.id == self.target.server.id
                 && attached.opened_gen == Some(self.target.run.generation)
@@ -135,16 +159,32 @@ impl LspManager {
         canonical: &Path,
         servers: &[ide_core::ServerId],
     ) {
-        self.retire_json_resources_in(docs, |id, _, resource_path, attached| {
+        self.queue_provider_catalog_refreshes(docs, path, canonical);
+        let affected = |id, _: &Path, resource_path: &Path, attached: &Attached| {
             Self::json_composer_input(path, canonical)
                 || id == doc
                 || resource_path == canonical
                 || servers.contains(&attached.server.id)
-                || attached
-                    .resource
-                    .as_ref()
-                    .is_some_and(|resource| resource.selector == path || resource.selector == canonical)
-        });
+                || attached.resource.as_ref().is_some_and(|resource| {
+                    resource.selector == path
+                        || resource.selector == canonical
+                        || resource.witness.provider_sources.as_ref().is_some_and(|sources| {
+                            sources.providers.iter().any(|provider| provider.path == path || provider.path == canonical)
+                        })
+                })
+        };
+        let refresh: Vec<_> = docs
+            .iter()
+            .filter(|(id, source)| {
+                Self::json_catalog_path(&source.path, &source.uri, &source.language)
+                    && source.servers.iter().any(|attached| affected(**id, &source.path, &source.canonical, attached))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in refresh {
+            self.refresh_retained_json_document(docs, id);
+        }
+        self.retire_json_resources_in(docs, affected);
     }
 
     pub(crate) fn retire_json_resources_for_document(&self, docs: &mut HashMap<DocId, DocState>, doc: DocId) {
@@ -163,7 +203,7 @@ impl LspManager {
         let servers: Vec<_> = source
             .servers
             .iter()
-            .filter(|attached| attached.resource.is_none())
+            .filter(|attached| source.language.as_str() == "php" || attached.resource.is_none())
             .map(|attached| attached.server.id)
             .collect();
         self.retire_json_resources_for_source(docs, doc, &path, &canonical, &servers);
@@ -189,12 +229,31 @@ impl LspManager {
         Ok(())
     }
 
-    pub(super) fn open_json_session<'a>(
-        &'a self,
+    pub(super) fn open_json_session(
+        &self,
         snap: &DocSnap,
         receipt: &mut PhpJsonTranslationResource,
         inputs: &JsonInputSnapshot,
-    ) -> IdeResult<ResourceSession<'a>> {
+    ) -> IdeResult<ResourceSession> {
+        self.open_resource_session(snap, receipt, inputs, false)
+    }
+
+    pub(super) fn open_provider_session(
+        &self,
+        snap: &DocSnap,
+        receipt: &mut PhpJsonTranslationResource,
+        inputs: &JsonInputSnapshot,
+    ) -> IdeResult<ResourceSession> {
+        self.open_resource_session(snap, receipt, inputs, true)
+    }
+
+    fn open_resource_session(
+        &self,
+        snap: &DocSnap,
+        receipt: &mut PhpJsonTranslationResource,
+        inputs: &JsonInputSnapshot,
+        provider: bool,
+    ) -> IdeResult<ResourceSession> {
         let target = &receipt.target;
         let mut docs = self.docs.lock();
         let doc_id = docs.iter().find_map(|(id, doc)| {
@@ -205,6 +264,14 @@ impl LspManager {
             .then_some(*id)
         });
         if doc_id.is_none()
+            || (provider
+                && (snap.language.as_str() != "php"
+                    || !provider_sync::supported(&target.caps())
+                    || !receipt
+                        .provider_sources
+                        .as_ref()
+                        .is_some_and(|sources| sources.providers.iter().any(|source| source.path == snap.path))))
+            || (!provider && snap.language.as_str() != "json")
             || snap.uri != uri::path_to_uri(&snap.path)
             || docs.values().filter(|doc| doc.canonical == snap.path).count() != 1
             || docs.values().any(|doc| {
@@ -231,11 +298,13 @@ impl LspManager {
             project: receipt.project.clone(),
             resource: receipt.resource.clone(),
             composer: receipt.composer.clone(),
+            provider_sources: receipt.provider_sources.clone(),
         });
         docs.get_mut(&doc_id).expect("current JSON resource document").servers.push(Attached {
             server: target.server.clone(),
             opened_gen: Some(target.run.generation),
-            resource: Some(JsonResourceAttachment {
+            resource: Some(PhpResourceAttachment {
+                provider,
                 selector: receipt.project.clone(),
                 cancel: cancel.clone(),
                 persistent: false,
@@ -251,9 +320,15 @@ impl LspManager {
             language: snap.language.clone(),
             text: snap.text.clone(),
         });
-        let session =
-            ResourceSession { manager: self, target: target.clone(), doc: doc_id, cancel, retained: false, witness };
-        let params = json!({"textDocument":{"uri":snap.uri,"languageId":"json","version":snap.version,"text":snap.text.as_str()}});
+        let session = ResourceSession {
+            manager: self.me.clone(),
+            target: target.clone(),
+            doc: doc_id,
+            cancel,
+            retained: false,
+            witness,
+        };
+        let params = json!({"textDocument":{"uri":snap.uri,"languageId":snap.language.as_str(),"version":snap.version,"text":snap.text.as_str()}});
         let sent = target.run.peer.notify("textDocument/didOpen", params);
         drop(docs);
         sent.map_err(|error| rpc_err(&target.server.name, "textDocument/didOpen", error))?;
@@ -330,6 +405,7 @@ impl LspManager {
                 }
                 Err(error) => return Err(error),
             };
+            receipt = self.synchronize_provider_sources(receipt, cancel).await?;
             if receipt.root.is_none() {
                 receipts.push(receipt);
                 continue;

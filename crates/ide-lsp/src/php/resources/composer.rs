@@ -224,6 +224,7 @@ impl LspManager {
             resource: resource.to_owned(),
             root: None,
             provider_sources: None,
+            provider_sessions: Vec::new(),
             target,
             sources,
             composer: Some(Arc::new(inputs)),
@@ -268,6 +269,7 @@ impl LspManager {
         target: &Target,
         cancel: &CancellationToken,
     ) -> IdeResult<PhpJsonTranslationResource> {
+        self.retire_unselected_provider_sources(target, composer);
         let (inputs, revision) = self.composer_resource_inputs(composer, resource, cancel).await?;
         let sources = self.navigation_sources(source, target)?;
         if sources.files_revision != revision || !self.execution_allowed.load(Ordering::Acquire) {
@@ -278,11 +280,25 @@ impl LspManager {
             resource: resource.to_owned(),
             root: None,
             provider_sources: None,
+            provider_sessions: Vec::new(),
             target: target.clone(),
             sources,
             composer: Some(Arc::new(inputs)),
         };
-        self.query_json_translation_resource(receipt, cancel.clone()).await
+        let provider_capability = providers::supported(&target.caps());
+        let prepared = async {
+            let receipt = self.query_json_translation_resource(receipt, cancel.clone()).await?;
+            self.synchronize_provider_sources(receipt, cancel).await
+        }
+        .await;
+        prepared.map_err(|mut error| {
+            // An unverifiable provider cannot be treated as an unrelated catalog:
+            // continuing would silently answer from its older disk registration.
+            if provider_capability && error.kind == ErrorKind::InvalidInput {
+                error.kind = ErrorKind::OutOfSync;
+            }
+            error
+        })
     }
 
     pub(super) async fn current_composer_resource_query(
@@ -419,6 +435,7 @@ mod tests {
                 resource: resource.clone(),
                 root: Some(resource.parent().unwrap().to_owned()),
                 provider_sources: None,
+                provider_sessions: Vec::new(),
                 target: target.clone(),
                 sources: manager.navigation_sources(&source, &target).unwrap(),
                 composer: Some(Arc::new(selected_inputs)),
@@ -428,6 +445,7 @@ mod tests {
                 resource: resource.clone(),
                 root: None,
                 provider_sources: None,
+                provider_sessions: Vec::new(),
                 target: target.clone(),
                 sources: manager.navigation_sources(&source, &target).unwrap(),
                 composer: Some(Arc::new(negative_inputs)),
@@ -458,7 +476,9 @@ mod tests {
             let result = if background {
                 manager.publish_refreshed_json_catalog(&catalog, &mut selected, &inputs)
             } else {
-                manager.open_json_session(&catalog, &mut selected, &inputs).and_then(|session| session.retain())
+                manager
+                    .open_json_session(&catalog, &mut selected, &inputs)
+                    .and_then(|session| references::ResourceSession::retain_all(vec![session]))
             };
             let mut wire = tokio::io::BufReader::new(wire);
             if action == "unchanged" {

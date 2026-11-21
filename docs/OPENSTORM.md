@@ -15,6 +15,84 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Declared provider buffer synchronization slice 226 (2026-11-21; client/Host accepted; candidate 191 inactive):
+FEAT-031/066/067/068: ordinary PHP navigation now shares only managed physical
+provider files named by the selected consumer's checked source receipts. A
+separate phpWorkbenchProviderSourceSync capability negotiates this behavior;
+metadata-only engines retain their content-free API. No settings or layout change
+is added. Unrelated buffers remain on their own servers. Provider attachments do
+not become primary consumer contexts. Source snapshots include their exact buffer
+versions and text identities. Existing transient ownership, restart and close
+handling withdraws these copies, and scoped leases roll back failed preparation.
+New provider and catalog leases are retained together only after validation.
+The existing 512-source, 1 MiB/file and 8 MiB aggregate bounds also constrain
+forwarded provider text, and dependency discovery refuses more than eight rounds.
+
+Navigation re-queries the consuming graph after forwarding declared providers,
+then admits only the catalogs that current source registers. Known dependency
+changes refresh open catalogs for that consumer, including a newly selected root.
+Closing the provider restores its disk registration. A content-free lookup also
+prepares provider dependencies when no JSON buffer is open; it creates no probe
+file. Public metadata calls never opt into forwarding. Invalid, stale, ambiguous,
+non-PHP, oversized or aliased provider inputs refuse navigation before disclosure.
+Provider preparation errors propagate instead of being skipped as unrelated JSON
+catalogs, which would otherwise silently answer from an older disk registration.
+All 96 JSON protocol regressions pass, including legacy negotiation, held-reply
+edits/restore, cancellation, failed re-query, edit/close/open, restart, execution
+revocation and Find Usages recovery.
+
+The real client initially returns the wrong private catalog. Its expanded fixture
+then exposes an engine defect: a removed provider class still registers its old
+disk root. A direct engine regression reproduces the same result, including an
+unresolved provider in the metadata. Temporary diagnostics identify an old
+Composer app/../shared URI versus the editor's canonical shared URI. The engine
+now refreshes every known alias contribution for that preferred physical source.
+An unresolved registered class contributes no resources; another class's boot
+method cannot replace it. Withdrawal and restoration pass for both direct edits
+and close/reopen. The pinned recipe appends patch 0191, preserving prior pins and
+provenance. All 18,748 engine tests pass / 17 ignored; release all-target Clippy
+passes with and without mem-audit, plus formatting, fingerprint verification and
+the production build. Engine 191 is locally signed for Apple Silicon and inactive.
+
+A disposable two-server fixture validates Composer/JSON, PHP files and drafts,
+the Laravel 13.37 vendor version and FileLoader runtime values. A content-free
+protocol trace proves that the declared provider reaches its consuming server,
+while an unrelated PHP buffer never does. Ordinary hover uses the unsaved root;
+provider edits publish the new catalog before another PHP action. Consumer
+restart preserves the other server, provider close restores disk behavior, and
+closed catalogs, class withdrawal and restoration use current source. Disk PHP
+and JSON stay unchanged. All three owned engine processes (including the replaced
+consumer) exit. Fresh workspace executables pass all 75 client and 62 Host cases
+on signed inactive 191; query-only 187 remains rejected. Source, executable and
+Cargo fingerprint witnesses match, and retained fixture originals are unchanged.
+Default engine 185 and the sole signed App 119 remain unchanged. Native GUI
+checks stay user-skipped; no application is promoted.
+
+Fresh workspace gates pass: Rust 5,629 / 263 ignored / the same 11 documented
+exclusions; all-target workspace Clippy with warnings denied; formatting; bindings
+fidelity; default-engine provenance; frontend 14,603 / eight skipped;
+types/lint/format/Knip; production build/Safari compatibility; 59 browser cases.
+Temporary dev/test builds disable debug information and strip test symbols for
+the disk budget. No performance parity is claimed.
+
+Latest regression executables replace 876,884,080 bytes of
+previous test payload. Removed 10028 files, 16.7GiB total. Frontend dist
+(73,745,139 bytes), engine compiler output and disposable
+source scratch are removed. All six retained test executables launch after
+cleanup. Earlier source/provenance/evaluation assets, both stashes and the sole
+app remain. All 69 areas stay visible at 67 partial/two user-deferred. Normal
+commit, push and remote read-back are recorded in the ignored acceptance receipt.
+
+Next: broader provider graphs and multiple consumer contexts in one server;
+background provider refresh without any open JSON source; new unsaved provider
+files without disk identity; wider physical/service matrices and concurrent
+foreground requests; performance measurements, promotion and native acceptance.
+Editor aliases intentionally refuse synchronization pending a wider acceptance
+matrix. Evidence: artifacts/checks/slice226/{gates,frontend-gates,engine-gates,
+candidate191,evaluation,real-current-green,frozen-runtimes,retention,
+engine-retention,retained-runtime-lists}.json and the red, diagnostic and green
+logs and content-free provider event traces.
+
 Provider source receipt slice 225 (2026-11-21; client/Host accepted; candidate 190 inactive):
 FEAT-031/066/067/068: the JSON resource extension now advertises a separate
 provider-source capability. For statically known Laravel provider classes it

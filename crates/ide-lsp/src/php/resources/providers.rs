@@ -2,9 +2,9 @@ use super::*;
 use std::io::Read;
 
 const CAPABILITY: &str = "/experimental/phpWorkbenchProviderSources";
-const MAX_PROVIDERS: usize = 512;
-const MAX_BYTES: u64 = 1_048_576;
-const MAX_TOTAL_BYTES: usize = 8 * 1_048_576;
+pub(super) const MAX_PROVIDERS: usize = 512;
+pub(super) const MAX_BYTES: u64 = 1_048_576;
+pub(super) const MAX_TOTAL_BYTES: usize = 8 * 1_048_576;
 
 /// A statically resolved provider file and its UTF-8 source digest in the selected server.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,7 +239,7 @@ impl LspManager {
 
     async fn provider_files(
         &self,
-        receipt: &PhpJsonTranslationResource,
+        snapshot: &NavigationSnapshot,
         sources: &PhpProviderSources,
         cancel: &CancellationToken,
     ) -> IdeResult<Vec<(PathBuf, Stamp)>> {
@@ -248,7 +248,7 @@ impl LspManager {
             files.insert(source.path.clone(), source.sha256_utf8);
         }
         let mut managed = std::collections::HashMap::new();
-        for source in &receipt.sources.sources {
+        for source in &snapshot.sources {
             if let Some(path) = uri::uri_to_path(source.uri.as_str())
                 && files.contains_key(&path)
             {
@@ -285,7 +285,7 @@ impl LspManager {
         cancel: &CancellationToken,
     ) -> IdeResult<PhpProviderSources> {
         let mut sources = parse(value)?;
-        sources.files = self.provider_files(receipt, &sources, cancel).await?;
+        sources.files = self.provider_files(&receipt.sources, &sources, cancel).await?;
         sources.inputs = self.provider_inputs(&sources);
         if sources.inputs.len() > 1024 {
             return Err(IdeError::invalid("Too many managed provider buffers"));
@@ -299,10 +299,20 @@ impl LspManager {
         sources: &PhpProviderSources,
         cancel: &CancellationToken,
     ) -> IdeResult<()> {
-        if !supported(&receipt.target.caps()) || !self.provider_buffers_current(sources) {
+        self.provider_sources_on_target_current(&receipt.target, &receipt.sources, sources, cancel).await
+    }
+
+    pub(super) async fn provider_sources_on_target_current(
+        &self,
+        target: &Target,
+        snapshot: &NavigationSnapshot,
+        sources: &PhpProviderSources,
+        cancel: &CancellationToken,
+    ) -> IdeResult<()> {
+        if !supported(&target.caps()) || !self.provider_buffers_current(sources) {
             return Err(IdeError::new(ErrorKind::OutOfSync, "Provider source inputs changed"));
         }
-        if self.provider_files(receipt, sources, cancel).await? != sources.files
+        if self.provider_files(snapshot, sources, cancel).await? != sources.files
             || !self.provider_buffers_current(sources)
         {
             return Err(IdeError::new(ErrorKind::OutOfSync, "Provider source authority changed"));

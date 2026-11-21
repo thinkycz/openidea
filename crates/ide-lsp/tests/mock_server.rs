@@ -17,6 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+#[path = "fixtures/provider_sync_mock.rs"]
+mod provider_sync_mock;
+
 #[path = "fixtures/json_translation_resources.rs"]
 mod json_translation_resources;
 

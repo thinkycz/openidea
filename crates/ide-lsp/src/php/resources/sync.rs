@@ -97,6 +97,18 @@ impl LspManager {
             });
             return Ok(None);
         }
+        if let Some(providers) = &witness.provider_sources {
+            let snapshot = self.navigation_snapshot(target)?;
+            if self.provider_sources_on_target_current(target, &snapshot, providers, cancel).await.is_err() {
+                self.retire_json_resources_in(&mut self.docs.lock(), |doc, _, _, attached| {
+                    doc == catalog.doc && attached.server.id == target.server.id
+                });
+                if cancel.is_cancelled() {
+                    return Err(IdeError::cancelled());
+                }
+                return Ok(None);
+            }
+        }
         let valid = if let Some(composer) = &witness.composer {
             self.composer_inputs_current(&witness.project, &witness.resource, composer, cancel).await
         } else {
@@ -168,7 +180,31 @@ impl LspManager {
             return Err(IdeError::cancelled());
         }
         if catalogs.is_empty() {
-            return self.finish_json_preparation(&selected, &catalogs, &[], revision, catalogs_revision).map(Some);
+            if !selected.iter().any(|target| provider_sync::supported(&target.caps())) {
+                return self.finish_json_preparation(&selected, &catalogs, &[], revision, catalogs_revision).map(Some);
+            }
+            let _selection = tokio::select! {biased;()=cancel.cancelled()=>return Err(IdeError::cancelled()),gate=self.php_json_resource_gate.lock()=>gate};
+            let composer = self.json_resource_manifest(&source.path, cancel).await?;
+            let mut opened = Vec::new();
+            if let Some(composer) = composer {
+                for target in &selected {
+                    if provider_sync::supported(&target.caps()) {
+                        let mut receipt = self
+                            .json_resource_on_target(
+                                &composer,
+                                &source.path.with_extension("json"),
+                                source,
+                                target,
+                                cancel,
+                            )
+                            .await?;
+                        opened.append(&mut receipt.provider_sessions);
+                    }
+                }
+            }
+            let prepared = self.finish_json_preparation(&selected, &catalogs, &[], revision, catalogs_revision)?;
+            references::ResourceSession::retain_all(opened)?;
+            return Ok(Some(prepared));
         }
         let composer = self.json_resource_manifest(&source.path, cancel).await?;
         let Some(composer) = composer else {
@@ -236,6 +272,7 @@ impl LspManager {
                 if cancel.is_cancelled() {
                     return Err(IdeError::cancelled());
                 }
+                opened.append(&mut receipt.provider_sessions);
                 let witness = if receipt.root.is_some() {
                     let session = self.open_json_session(&catalog.snap, &mut receipt, &inputs)?;
                     let witness = session.witness.clone();
@@ -258,9 +295,7 @@ impl LspManager {
             self.navigation_sources(source, target)?;
         }
         let prepared = self.finish_json_preparation(&selected, &catalogs, &proofs, revision, catalogs_revision)?;
-        for session in opened {
-            session.retain()?;
-        }
+        references::ResourceSession::retain_all(opened)?;
         Ok(Some(prepared))
     }
 

@@ -1,5 +1,6 @@
 use super::*;
 mod composer;
+mod provider_sync;
 mod providers;
 pub use providers::{PhpProviderSource, PhpProviderSources};
 mod references;
@@ -14,7 +15,8 @@ pub struct PhpJsonTranslationResource {
     project: PathBuf,
     resource: PathBuf,
     root: Option<PathBuf>,
-    provider_sources: Option<PhpProviderSources>,
+    provider_sources: Option<Arc<PhpProviderSources>>,
+    provider_sessions: Vec<references::ResourceSession>,
     target: Target,
     sources: NavigationSnapshot,
     composer: Option<Arc<ComposerInputs>>,
@@ -24,6 +26,7 @@ pub(crate) struct JsonResourceWitness {
     project: PathBuf,
     resource: PathBuf,
     composer: Option<Arc<ComposerInputs>>,
+    provider_sources: Option<Arc<PhpProviderSources>>,
 }
 
 struct JsonInputSnapshot {
@@ -57,7 +60,7 @@ impl PhpJsonTranslationResource {
 
     /// Static locations and server-held digests; this does not authorize forwarding buffers.
     pub fn provider_sources(&self) -> Option<&PhpProviderSources> {
-        self.provider_sources.as_ref()
+        self.provider_sources.as_deref()
     }
 }
 
@@ -192,6 +195,7 @@ impl LspManager {
             resource: resource.to_owned(),
             root: None,
             provider_sources: None,
+            provider_sessions: Vec::new(),
             target,
             sources,
             composer: None,
@@ -261,7 +265,7 @@ impl LspManager {
             let value = reply
                 .provider_sources
                 .ok_or_else(|| IdeError::invalid("Missing advertised provider source metadata"))?;
-            receipt.provider_sources = Some(self.read_provider_sources(&receipt, value, &cancel).await?);
+            receipt.provider_sources = Some(Arc::new(self.read_provider_sources(&receipt, value, &cancel).await?));
             if *self.json_preparation_changed.borrow() != inputs.revision {
                 return Err(IdeError::new(ErrorKind::OutOfSync, "Managed inputs changed during provider lookup"));
             }
@@ -281,6 +285,9 @@ impl LspManager {
             return Err(IdeError::cancelled());
         }
         self.laravel_query_current(&receipt.target, &receipt.sources)?;
+        if !receipt.provider_sessions.is_empty() && !provider_sync::supported(&receipt.target.caps()) {
+            return Err(IdeError::new(ErrorKind::OutOfSync, "Provider synchronization capability changed"));
+        }
         if !self.execution_allowed.load(Ordering::Acquire) || !supports_resources(&receipt.target.caps()) {
             return Err(IdeError::new(ErrorKind::OutOfSync, "JSON resource server capabilities changed"));
         }

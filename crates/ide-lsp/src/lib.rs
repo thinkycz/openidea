@@ -1432,6 +1432,7 @@ impl LspManager {
                 self.runtime.spawn(async move { hint.check_vue_navigation(&server).await });
             }
         }
+        self.discover_json_document(doc);
     }
 
     pub fn did_change(&self, doc: DocId, version: u32, changes: &[AppliedChange], full_text: &dyn Fn() -> String) {

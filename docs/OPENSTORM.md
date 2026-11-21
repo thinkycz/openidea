@@ -15,6 +15,84 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+New catalog discovery slice 215 (2026-11-21; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: opening a custom JSON catalog now queues discovery when a
+compatible PHPantom generation already serves open PHP buffers. JSON opening
+alone still cannot start PHP. Discovery uses those buffers' nearest Composer
+manifests, deduplicates consumers in the same project and ignores the catalog's
+nearest package as an origin. It shares text only after current metadata proves
+one positive consuming context for that server.
+
+Every discovered context must finish its registration decision before admission.
+Ambiguous positives and incomplete contexts keep the buffer unshared. Removing
+an ambiguous or invalid active PHP consumer can recover without a PHP navigation
+request. When multiple contexts were checked, the unique positive context is
+queried again immediately before opening, restoring that selection in the engine.
+All receipts retain their Composer, source and generation witnesses.
+
+Discovery reuses the retained-refresh queue, debounce, current-source validation,
+publication guard and cancellation ownership. Foreground PHP actions and explicit
+JSON Find Usages supersede queued work; close, disable, stop, reconfigure and
+shutdown retain their cancellation rules. Unsupported capabilities and optional
+PHP servers receive no discovery protocol. Negative results wait for another
+input change, allowing later registration to recover without a polling loop.
+
+The new public regression first observes no catalog in the PHP server until a
+PHP request occurs. After implementation all 67 focused JSON cases pass. Five
+new protocol groups cover opening without a PHP request; complete, deduplicated,
+unique selection versus ambiguity/incompleteness and recovery; held-admission
+foreground/lifecycle boundaries; capabilities, provider choices, JSON-only
+startup and negative-result recovery; and final Composer-witness plus
+nearest-manifest revalidation. Held responses first reproduce forwarding after an unreported
+consumer manifest change and after a nearer manifest is created. Every known
+receipt and physical buffer-to-manifest association is now checked after final
+selection, before opening. The initial Clippy dependency build was deliberately
+interrupted for these corrections; its log remains. No timeout is relaxed to
+establish a positive result.
+
+The real-client case first opens JSON without PHP and confirms no server starts,
+then closes it, waits for PHP readiness, and opens a fresh catalog document.
+Its first JSON open frame must arrive before the first PHP navigation request.
+The managed Host case likewise waits for a compatible PHP consumer before opening
+a catalog. It requires the current unsaved document version on the wire before
+hover or definition commands, then proves those commands reuse that session.
+An initial disk-version admission and a later private-version refresh are both
+legitimate; unchanged PHP commands cannot add another admission.
+
+The shared protocol recorder now logs document versions and file-watch URI
+notifications, with no buffer text added to its event log. The Host save case
+requires a new host watcher event and an actual catalog open frame ordered after
+the matching watcher protocol frame, before another PHP command. The deterministic
+fake-engine overlapping-ID counterexample still distinguishes the broken proxy
+from the current recorder. Existing Unicode navigation, edits, save-conflict,
+restart, reopen, references and owned-process shutdown scenarios remain.
+
+Fresh workspace executables reject query-only engine 187, then pass all 72 client
+and 62 Host cases on signed inactive engine 188. Source, Cargo fingerprint and
+binary witnesses match; retained fixture originals remain unchanged. Gates pass:
+Rust 5,598 / 260 ignored / the same 11 documented exclusions; workspace all-target
+Clippy with warnings denied; Rust formatting; bindings fidelity; default-engine
+provenance; frontend 14,603 / eight skipped; types/lint/format/Knip; production
+build/Safari startup; 59 controlled-browser cases. Debug linking reports
+13 instances of the existing large-unwind-table warning class. Native GUI
+checks remain user-skipped; no engine or app is promoted.
+
+The latest 134-case regression set replaces the previous
+1,274,971,536-byte payload. Cargo cleanup: Removed 19677 files, 27.5GiB total.
+Removed frontend dist (73,745,139 bytes). The sole signed App 119,
+default engine 185, engine provenance, historical receipts and both stashes remain
+preserved. Normal commit, push and remote read-back are recorded in the ignored
+acceptance receipt. All 69 areas remain visible at 67 partial/two user-deferred.
+
+Next: reconciliation when PHP becomes ready after JSON was opened, PHP-buffer
+changes, configuration/root changes and restart; wider nested/closed consumers,
+separate-server package-provider overlays and multiple-positive-consumer support
+before promotion/packaging. Discovery currently uses already active open PHP
+consumers and refuses ambiguity; it does not establish whole-repository ownership.
+Large-catalog performance, wider physical/service matrices and native UI remain
+unverified. Evidence: artifacts/checks/slice215/{gates,frontend-gates,evaluation,
+focused-real-host,proxy-ids,frozen-runtimes,retention}.json and failure logs.
+
 Retained catalog background refresh slice 214 (2026-11-21; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: editing or saving a previously admitted JSON catalog now queues
 a background refresh. It retires stale text immediately, debounces changes and

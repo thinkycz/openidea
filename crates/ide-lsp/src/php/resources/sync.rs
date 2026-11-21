@@ -169,7 +169,7 @@ impl LspManager {
         if catalogs.is_empty() {
             return self.finish_json_preparation(&selected, &catalogs, &[], revision, catalogs_revision).map(Some);
         }
-        let composer = self.json_resource_manifest(source, cancel).await?;
+        let composer = self.json_resource_manifest(&source.path, cancel).await?;
         let Some(composer) = composer else {
             self.retire_json_resources_in(&mut self.docs.lock(), |doc, _, _, attached| {
                 catalogs.iter().any(|catalog| catalog.doc == doc)
@@ -265,10 +265,10 @@ impl LspManager {
 
     pub(super) async fn json_resource_manifest(
         &self,
-        source: &DocSnap,
+        path: &Path,
         cancel: &CancellationToken,
     ) -> IdeResult<Option<PathBuf>> {
-        let path = source.path.clone();
+        let path = path.to_owned();
         let boundary = self.project_root_for(&path);
         let worker_cancel = cancel.clone();
         tokio::select! {biased;()=cancel.cancelled()=>Err(IdeError::cancelled()),result=tokio::task::spawn_blocking(move||{

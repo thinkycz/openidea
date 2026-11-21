@@ -1085,3 +1085,229 @@ async fn registered_json_background_refresh_waits_for_a_clean_manifest_without_s
     assert_eq!(state.requested("textDocument/hover").len(), 1);
     h.mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_opening_a_catalog_discovers_an_active_php_consumer_without_a_php_request() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let path = h.root.join("packages/billing/json/en.json");
+    let resource = path.clone();
+    let state = h.launcher.state("phpantom");
+    state
+        .responder
+        .lock()
+        .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+    h.open("Caller.php", "<?php __('Greeting 😀');");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let catalog = DocId::next();
+    h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    assert!(state.requested("textDocument/hover").is_empty());
+    assert!(state.requested(METHOD).iter().all(|params| params["projectUri"] == uri_of(&h.root.join("composer.json"))));
+    assert!(!path.exists());
+    h.mgr.did_close(catalog);
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_discovery_checks_every_open_context_before_unique_admission() {
+    for mode in ["unique", "ambiguous", "incomplete"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        let first = h.root.join("composer.json");
+        std::fs::write(&first, MANIFEST).unwrap();
+        let nested = h.root.join("consumers/other");
+        std::fs::create_dir_all(&nested).unwrap();
+        let second = nested.join("composer.json");
+        std::fs::write(&second, if mode == "incomplete" { "broken JSON" } else { MANIFEST }).unwrap();
+        let package = h.root.join("packages/billing");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("composer.json"), "{}").unwrap();
+        let path = package.join("json/en.json");
+        let resource = path.clone();
+        let second_uri = uri_of(&second);
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |_, method, params| {
+            if method != METHOD {
+                return None;
+            }
+            if params["projectUri"] == second_uri {
+                held.hold();
+            }
+            Some(echo(
+                params,
+                (mode == "ambiguous" || params["projectUri"] != second_uri).then(|| resource.parent().unwrap()),
+            ))
+        }));
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.open("SecondCaller.php", "<?php __('Greeting 😀');");
+        let (other, _) = h.open("consumers/other/Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        if mode != "incomplete" {
+            eventually(|| gate.entered()).await;
+            assert!(
+                !state.docs.lock().contains_key(&uri_of(&path)),
+                "do not send text while another consumer is unproven"
+            );
+            gate.open();
+        }
+        if mode == "unique" {
+            eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+            let projects: Vec<_> =
+                state.requested(METHOD).into_iter().map(|params| params["projectUri"].clone()).collect();
+            assert_eq!(
+                projects,
+                vec![uri_of(&first), uri_of(&second), uri_of(&first)],
+                "deduplicate PHP buffers, then select the unique positive context again"
+            );
+        } else {
+            eventually(|| !state.requested(METHOD).is_empty()).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{mode}");
+            h.mgr.did_close(other);
+            eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        }
+        assert!(
+            state.requested(METHOD).iter().all(|params| params["projectUri"] != uri_of(&package.join("composer.json"))),
+            "the catalog's nearest package is not its consumer"
+        );
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_discovery_yields_to_foreground_and_lifecycle_changes_before_sharing() {
+    for change in ["foreground", "close", "disable", "restart"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move|state,method,params|match method {
+            METHOD=>{if state.requested(METHOD).len()==1 {held.hold();}Some(echo(params,resource.parent()))},
+            "textDocument/hover"=>Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),_=>None,
+        }));
+        let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| gate.entered()).await;
+        match change {
+            "foreground" => {
+                let hover =
+                    tokio::time::timeout(Duration::from_secs(2), h.mgr.hover(php, Pos::new(0, 10), Default::default()))
+                        .await
+                        .expect("foreground PHP action must supersede discovery")
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(hover.contents.value, TEXT);
+            }
+            "close" => h.mgr.did_close(catalog),
+            "disable" => h.mgr.set_execution_allowed(false),
+            "restart" => {
+                let server = h.mgr.servers().into_iter().find(|s| s.name == "phpantom").unwrap().id;
+                h.mgr.restart(server).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let opens: Vec<_> = state
+            .notified("textDocument/didOpen")
+            .into_iter()
+            .filter(|params| params["textDocument"]["uri"] == uri_of(&path))
+            .collect();
+        assert_eq!(opens.len(), usize::from(change == "foreground"), "{change}");
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_discovery_keeps_capabilities_and_server_choices_and_recovers_from_negative_results() {
+    for (name, advertised) in [("phpantom", false), ("phpactor", true), ("intelephense", true)] {
+        let h = harness_for("php", "php", &[(name, if advertised { caps() } else { incremental_caps() })], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status(name, ServerStatus::Ready).await;
+        h.mgr.did_open(DocId::next(), &h.root.join("catalogs/en.json"), &LanguageId::new("json"), 1, TEXT);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(h.launcher.state(name).requested(METHOD).is_empty());
+        h.mgr.shutdown_all().await;
+    }
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    h.mgr.did_open(DocId::next(), &h.root.join("unopened/en.json"), &LanguageId::new("json"), 1, TEXT);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(h.mgr.servers().is_empty());
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let path = h.root.join("catalogs/en.json");
+    let resource = path.clone();
+    let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let active = registered.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |_, method, params| {
+        (method == METHOD).then(|| echo(params, active.load(Ordering::Acquire).then(|| resource.parent().unwrap())))
+    }));
+    h.open("Caller.php", "<?php __('Greeting 😀');");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+    eventually(|| !state.requested(METHOD).is_empty()).await;
+    assert!(!state.docs.lock().contains_key(&uri_of(&path)));
+    registered.store(true, Ordering::Release);
+    h.open("Provider.php", "<?php /* registration changed */");
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    assert!(state.requested("textDocument/hover").is_empty());
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_discovery_rechecks_other_composer_witnesses_after_final_selection() {
+    for change in ["existing", "nearest"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let nested = h.root.join("consumers/other");
+        std::fs::create_dir_all(&nested).unwrap();
+        let second = nested.join("composer.json");
+        if change == "existing" {
+            std::fs::write(&second, MANIFEST).unwrap();
+        }
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let second_uri = uri_of(&second);
+        let state = h.launcher.state("phpantom");
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        state.responder.lock().replace(Arc::new(move |state, method, params| {
+            if method != METHOD {
+                return None;
+            }
+            if state.requested(METHOD).len() == if change == "existing" { 3 } else { 1 } {
+                held.hold();
+            }
+            Some(echo(
+                params,
+                (change == "nearest" || params["projectUri"] != second_uri).then(|| resource.parent().unwrap()),
+            ))
+        }));
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        let (other, _) = h.open("consumers/other/Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| gate.entered()).await;
+        // Omit a watcher notification to test both disk content and context selection.
+        std::fs::write(&second, r#"{"require":{"laravel/framework":"13.37.0"},"extra":{"changed":true}}"#).unwrap();
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !state.docs.lock().contains_key(&uri_of(&path)),
+            "{change}: do not forward after consumer context changed during selection"
+        );
+        h.mgr.did_close(other);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        h.mgr.shutdown_all().await;
+    }
+}

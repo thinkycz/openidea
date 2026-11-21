@@ -67,10 +67,16 @@ def pump(source, outbound):
                     requests[message['id']] = method
             child.stdin.write(frame)
             child.stdin.flush()
+            events = []
             if method in {'textDocument/didOpen', 'textDocument/didChange', 'textDocument/didClose'}:
-                uri = message['params']['textDocument']['uri']
+                document = message['params']['textDocument']
+                events.append({'method': method, 'uri': document['uri'], 'version': document.get('version')})
+            elif method == 'workspace/didChangeWatchedFiles':
+                events.extend({'method': method, 'uri': change['uri']} for change in message['params']['changes'])
+            if events:
                 with events_lock, (control / 'events.jsonl').open('a') as log:
-                    log.write(json.dumps({'method': method, 'uri': uri}) + '\n')
+                    for event in events:
+                        log.write(json.dumps(event) + '\n')
             continue
         with state_lock:
             method = requests.pop(message.get('id'), None) if ('result' in message or 'error' in message) else None

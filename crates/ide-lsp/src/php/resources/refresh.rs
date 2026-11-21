@@ -77,6 +77,39 @@ impl LspManager {
         self.cancel_json_refreshes(|key| ids.contains(&key.doc));
     }
 
+    pub(crate) fn discover_json_document(&self, doc: DocId) {
+        if self.shutting_down.load(Ordering::Acquire) || !self.execution_allowed.load(Ordering::Acquire) {
+            return;
+        }
+        let active = {
+            let docs = self.docs.lock();
+            let Some(catalog) = docs.get(&doc) else { return };
+            if !Self::json_catalog_path(&catalog.path, &catalog.uri, &catalog.language)
+                || catalog
+                    .servers
+                    .iter()
+                    .any(|attached| attached.resource.is_none() && attached.server.name == "phpantom")
+            {
+                return;
+            }
+            let mut seen = HashSet::new();
+            docs.values()
+                .filter(|source| source.language.as_str() == "php")
+                .flat_map(|source| source.servers.iter())
+                .filter(|attached| attached.resource.is_none() && attached.server.name == "phpantom")
+                .filter_map(|attached| {
+                    let generation = attached.opened_gen?;
+                    let run = attached.server.running_gen(generation)?;
+                    (supports_resources(&run.caps.read()) && seen.insert((attached.server.id, generation)))
+                        .then(|| (attached.server.clone(), generation))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (server, generation) in active {
+            self.queue_json_refresh(JsonRefreshKey { doc, server: server.id, generation }, server, None);
+        }
+    }
+
     pub(crate) fn refresh_retained_json_document(&self, docs: &HashMap<DocId, DocState>, doc: DocId) {
         let Some(source) = docs.get(&doc) else { return };
         if !Self::json_catalog_path(&source.path, &source.uri, &source.language) {
@@ -88,55 +121,60 @@ impl LspManager {
             if !resource.persistent || resource.cancel.is_cancelled() {
                 continue;
             }
-            let key = JsonRefreshKey { doc, server: attached.server.id, generation };
-            let cancel = Arc::new(CancellationToken::new());
-            if let Some(previous) = self.json_refreshes.lock().insert(key, cancel.clone()) {
-                previous.cancel();
-            }
-            let task = RefreshTask { manager: self.me.clone(), key, cancel };
-            let project = resource.selector.clone();
-            let server = attached.server.clone();
-            let mut changed = self.json_preparation_changed.subscribe();
-            self.runtime.spawn(async move {
-                loop {
-                    changed.borrow_and_update();
-                    tokio::select! {
-                        biased;
-                        () = task.cancel.cancelled() => return,
-                        result = changed.changed() => { if result.is_err() { return; } continue; },
-                        () = tokio::time::sleep(Duration::from_millis(100)) => {},
-                    }
-                    let Some(manager) = task.manager.upgrade() else { return };
-                    let attempt = task.cancel.child_token();
-                    let result = tokio::select! {
-                        biased;
-                        () = task.cancel.cancelled() => { attempt.cancel(); return; },
-                        result = changed.changed() => { attempt.cancel(); if result.is_err() { return; } None },
-                        result = manager.refresh_json_catalog(key, &project, &server, &attempt) => Some(result),
-                    };
-                    drop(manager);
-                    match result {
-                        Some(Ok(true)) => return,
-                        Some(Err(error)) => {
-                            tracing::debug!(kind = ?error.kind, "Retained JSON refresh awaits current inputs")
-                        }
-                        Some(Ok(false)) => {}
-                        None => continue,
-                    }
-                    tokio::select! {
-                        biased;
-                        () = task.cancel.cancelled() => return,
-                        result = changed.changed() => { if result.is_err() { return; } },
-                    }
-                }
-            });
+            self.queue_json_refresh(
+                JsonRefreshKey { doc, server: attached.server.id, generation },
+                attached.server.clone(),
+                Some(resource.selector.clone()),
+            );
         }
+    }
+
+    fn queue_json_refresh(&self, key: JsonRefreshKey, server: Arc<Server>, project: Option<PathBuf>) {
+        let cancel = Arc::new(CancellationToken::new());
+        if let Some(previous) = self.json_refreshes.lock().insert(key, cancel.clone()) {
+            previous.cancel();
+        }
+        let task = RefreshTask { manager: self.me.clone(), key, cancel };
+        let mut changed = self.json_preparation_changed.subscribe();
+        self.runtime.spawn(async move {
+            loop {
+                changed.borrow_and_update();
+                tokio::select! {
+                    biased;
+                    () = task.cancel.cancelled() => return,
+                    result = changed.changed() => { if result.is_err() { return; } continue; },
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {},
+                }
+                let Some(manager) = task.manager.upgrade() else { return };
+                let attempt = task.cancel.child_token();
+                let result = tokio::select! {
+                    biased;
+                    () = task.cancel.cancelled() => { attempt.cancel(); return; },
+                    result = changed.changed() => { attempt.cancel(); if result.is_err() { return; } None },
+                    result = manager.refresh_json_catalog(key, project.as_deref(), &server, &attempt) => Some(result),
+                };
+                drop(manager);
+                match result {
+                    Some(Ok(true)) => return,
+                    Some(Err(error)) => {
+                        tracing::debug!(kind = ?error.kind, "JSON catalog refresh awaits current inputs")
+                    }
+                    Some(Ok(false)) => {}
+                    None => continue,
+                }
+                tokio::select! {
+                    biased;
+                    () = task.cancel.cancelled() => return,
+                    result = changed.changed() => { if result.is_err() { return; } },
+                }
+            }
+        });
     }
 
     async fn refresh_json_catalog(
         &self,
         key: JsonRefreshKey,
-        project: &Path,
+        project: Option<&Path>,
         server: &Arc<Server>,
         cancel: &CancellationToken,
     ) -> IdeResult<bool> {
@@ -183,26 +221,76 @@ impl LspManager {
             sources.sort_by(|left, right| left.1.cmp(&right.1));
             sources
         };
+        let mut contexts = Vec::new();
+        let mut manifests = Vec::new();
         for (doc, _) in sources {
             if cancel.is_cancelled() {
                 return Err(IdeError::cancelled());
             }
             let Ok(source) = self.snapshot(doc) else { continue };
-            if source.uri != uri::path_to_uri(&source.path)
-                || self.json_resource_manifest(&source, cancel).await.ok().flatten().as_deref() != Some(project)
-            {
+            if source.uri != uri::path_to_uri(&source.path) {
                 continue;
             }
-            let mut receipt = self.json_resource_on_target(project, &catalog.path, &source, &target, cancel).await?;
-            if receipt.root.is_none() {
-                return Ok(false);
+            let manifest = match self.json_resource_manifest(&source.path, cancel).await {
+                Ok(manifest) => manifest,
+                Err(error) if project.is_some() => {
+                    if cancel.is_cancelled() {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            manifests.push((source.path.clone(), manifest.clone()));
+            let Some(manifest) = manifest else { continue };
+            if project.is_some_and(|project| project != manifest) {
+                continue;
             }
-            if cancel.is_cancelled() {
-                return Err(IdeError::cancelled());
+            contexts.push((manifest, source));
+            if project.is_some() {
+                break;
             }
-            self.open_json_session(&catalog, &mut receipt)?.retain()?;
+        }
+        contexts.sort_by(|left, right| left.0.cmp(&right.0));
+        contexts.dedup_by(|left, right| left.0 == right.0);
+        if contexts.is_empty() {
             return Ok(true);
         }
+        let mut receipts = Vec::new();
+        for (manifest, source) in &contexts {
+            receipts.push(self.json_resource_on_target(manifest, &catalog.path, source, &target, cancel).await?);
+        }
+        for receipt in &receipts {
+            self.php_json_translation_resource_current(receipt, cancel.clone()).await?;
+        }
+        let positive: Vec<_> = receipts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, receipt)| receipt.root.is_some().then_some(index))
+            .collect();
+        let [selected] = positive.as_slice() else { return Ok(false) };
+        let mut receipt = if contexts.len() > 1 {
+            let (manifest, source) = &contexts[*selected];
+            self.json_resource_on_target(manifest, &catalog.path, source, &target, cancel).await?
+        } else {
+            receipts.remove(*selected)
+        };
+        if receipt.root.is_none() {
+            return Ok(false);
+        }
+        for checked in &receipts {
+            self.php_json_translation_resource_current(checked, cancel.clone()).await?;
+        }
+        self.php_json_translation_resource_current(&receipt, cancel.clone()).await?;
+        for (path, manifest) in &manifests {
+            if self.json_resource_manifest(path, cancel).await? != *manifest {
+                return Err(IdeError::cancelled());
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(IdeError::cancelled());
+        }
+        self.open_json_session(&catalog, &mut receipt)?.retain()?;
         Ok(true)
     }
 }

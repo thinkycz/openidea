@@ -271,8 +271,35 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         let alternate = root.join("packages/billing/alternate/en.json");
         mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, OVERLAY);
         assert!(mgr.servers().is_empty(), "catalog opening alone does not launch a PHP server");
+        mgr.did_close(json);
         mgr.did_open(caller, &root.join("app/Caller.php"), &LanguageId::new("php"), 1, CALLER);
         mgr.did_open(provider, &root.join("app/Provider.php"), &LanguageId::new("php"), 1, PROVIDER);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !mgr.servers().iter().any(|server| {
+                server.name == "phpantom" && matches!(server.status, ServerStatus::Ready | ServerStatus::Busy)
+            }) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("PHP consumer ready before catalog opening");
+        let count = |method: &str| {
+            std::fs::read_to_string(control.join("events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|event| event["method"] == method && event["uri"] == ide_lsp::path_to_uri_string(&catalog))
+                .count()
+        };
+        let json = DocId::next();
+        mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, OVERLAY);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") != 1 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("new catalog must be admitted before the first PHP request");
         for _ in 0..2 {
             let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
             assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
@@ -281,14 +308,6 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             assert_eq!(targets[0].path.to_path_buf(), catalog);
             assert_eq!(targets[0].range.start, pos(OVERLAY, "Greeting 😀"));
         }
-        let count = |method: &str| {
-            std::fs::read_to_string(control.join("events.jsonl"))
-                .unwrap()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .filter(|event| event["method"] == method && event["uri"] == ide_lsp::path_to_uri_string(&catalog))
-                .count()
-        };
         assert_eq!(count("textDocument/didOpen"), 1, "unchanged PHP requests reuse one admitted overlay");
         assert_eq!(count("textDocument/didClose"), 0, "retain the catalog after ordinary PHP navigation");
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;

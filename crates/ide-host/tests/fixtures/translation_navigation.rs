@@ -571,9 +571,43 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
     );
     let outcome = std::panic::AssertUnwindSafe(async {
         let path = f.root.join("packages/billing/json/en.json");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !f.project.lsp.servers().iter().any(|server| {
+                server.name == "phpantom"
+                    && matches!(
+                        server.status,
+                        ide_core::event::ServerStatus::Ready | ide_core::event::ServerStatus::Busy
+                    )
+            }) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("managed PHP consumer ready before catalog opening");
+        let frames = || {
+            std::fs::read_to_string(control.join("events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|event| event["uri"] == ide_lsp::path_to_uri_string(&path))
+                .collect::<Vec<_>>()
+        };
+        let opens = || frames().iter().filter(|event| event["method"] == "textDocument/didOpen").count();
         let catalog = f.project.documents.open(&path).unwrap();
         assert_eq!(catalog.language.as_str(), "json");
         f.project.documents.replace_all(catalog.id, overlay).unwrap();
+        let private_version = f.project.documents.version(catalog.id).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !frames()
+                .iter()
+                .any(|event| event["method"] == "textDocument/didOpen" && event["version"] == private_version)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("current unsaved catalog must be admitted before the first PHP command");
+        let opens_before_navigation = opens();
         for _ in 0..2 {
             let hover = ide_host::ops::lsp::lsp_hover(
                 &f.host,
@@ -599,25 +633,17 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             assert_eq!(targets[0].path.to_path_buf(), path);
             assert_eq!(targets[0].range, key_range(overlay, "Greeting 😀"));
         }
-        let opens = || {
-            std::fs::read_to_string(control.join("events.jsonl"))
-                .unwrap()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .filter(|event| {
-                    event["method"] == "textDocument/didOpen" && event["uri"] == ide_lsp::path_to_uri_string(&path)
-                })
-                .count()
-        };
-        assert_eq!(opens(), 1, "normal Host navigation reuses one admitted catalog");
+        assert_eq!(opens(), opens_before_navigation, "normal Host navigation reuses the current admitted catalog");
+        let before_edit = opens();
         f.project.documents.replace_all(catalog.id, updated).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while opens() != 2 {
+            while opens() != before_edit + 1 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("managed edit must refresh before another PHP command");
+        let frames_before_save = frames().len();
         let events_before_save = f.events.lock().unwrap().len();
         f.project.documents.save(catalog.id).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
@@ -640,19 +666,20 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         .expect("the saved catalog must publish a new watcher event");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let events = std::fs::read_to_string(control.join("events.jsonl")).unwrap();
-                let last = events
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                    .rfind(|event| event["uri"] == ide_lsp::path_to_uri_string(&path));
-                if opens() >= 3 && last.as_ref().is_some_and(|event| event["method"] == "textDocument/didOpen") {
+                let all = frames();
+                let saved = &all[frames_before_save..];
+                let watched = saved.iter().rposition(|event| event["method"] == "workspace/didChangeWatchedFiles");
+                let reopened = saved.iter().rposition(|event| event["method"] == "textDocument/didOpen");
+                if watched.zip(reopened).is_some_and(|(watched, reopened)| reopened > watched)
+                    && saved.last().is_some_and(|event| event["method"] == "textDocument/didOpen")
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("managed save must refresh after its watcher echo, before another PHP command");
+        .expect("managed save must refresh after the actual watcher protocol frame, before another PHP command");
         let hover = ide_host::ops::lsp::lsp_hover(
             &f.host,
             "main",

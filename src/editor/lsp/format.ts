@@ -139,6 +139,30 @@ export async function formatDocument(
   return result;
 }
 
+function formattingCurrent(view: EditorView): () => boolean {
+  const doc = docOf(view);
+  const text = view.state.doc;
+  const scope = useProject.getState();
+  const options = formatOptionsOf(view.state);
+  return () => {
+    const current = useProject.getState();
+    const indent = formatOptionsOf(view.state);
+    return (
+      docOf(view) === doc &&
+      !doc?.readOnly &&
+      !view.state.readOnly &&
+      view.state.doc === text &&
+      current.project === scope.project &&
+      current.settings === scope.settings &&
+      current.lightEdit === scope.lightEdit &&
+      !current.opening &&
+      current.openingPath === null &&
+      indent.tabSize === options.tabSize &&
+      indent.insertSpaces === options.insertSpaces
+    );
+  };
+}
+
 async function format(view: EditorView, opts: FormatDocumentOptions): Promise<FormatResult> {
   const { project, settings } = useProject.getState();
   const guard = formatGuardOptions(settings);
@@ -154,9 +178,11 @@ async function format(view: EditorView, opts: FormatDocumentOptions): Promise<Fo
     return applyContributedFormat(view, own, opts, guard);
   }
   const doc = docOf(view);
-  if (!doc || doc.readOnly) return NOTHING;
+  if (!doc || doc.readOnly || view.state.readOnly) return NOTHING;
+  const current = formattingCurrent(view);
   // The server formats the backend's copy: let pending keystrokes reach it first.
   await whenSynced(view);
+  if (!current()) return NOTHING;
   const state = view.state;
   const targets = targetRanges(state, opts);
   if (!targets.length) return NOTHING;
@@ -165,12 +191,15 @@ async function format(view: EditorView, opts: FormatDocumentOptions): Promise<Fo
   try {
     for (const target of targets) {
       const range = target && { start: offsetToPos(state.doc, target.from), end: offsetToPos(state.doc, target.to) };
-      const edits = await lspRequest(() =>
-        commands.lspFormat(doc.doc, range, { ...options, onSave: opts.onSave, tool: opts.tool }),
+      const edits = await lspRequest(
+        () => commands.lspFormat(doc.doc, range, { ...options, onSave: opts.onSave, tool: opts.tool }),
+        current,
       );
+      if (!current()) break;
       formatted.push(...within(textEditsToChanges(state.doc, edits), opts.ranges ? target : null));
     }
   } catch (e) {
+    if (!current()) return NOTHING;
     const formatter =
       e instanceof IpcError && e.data?.type === "tool"
         ? {
@@ -201,8 +230,9 @@ async function format(view: EditorView, opts: FormatDocumentOptions): Promise<Fo
     } else reportLspError(view, e, opts.explicit);
     return isUnavailable(e) ? { ...NOTHING, noFormatter: true } : NOTHING;
   }
-  if (view.state.doc !== state.doc) {
-    if (opts.explicit) showHint(view, "The file changed while formatting; try again");
+  if (!current()) {
+    if (opts.explicit && docOf(view) === doc && !view.state.readOnly)
+      showHint(view, "The file changed while formatting; try again");
     return NOTHING;
   }
   const changes = guardFormatChanges(state.doc.toString(), disjoint(formatted), guard);
@@ -237,20 +267,22 @@ export function dedentsToColumnZero(before: string, after: string): boolean {
  */
 export async function formatLines(view: EditorView, from: number, to: number): Promise<boolean> {
   const doc = docOf(view);
-  if (!doc || doc.readOnly) return false;
+  if (!doc || doc.readOnly || view.state.readOnly) return false;
+  const current = formattingCurrent(view);
   const { project, settings } = useProject.getState();
   if (formatExcluded(doc.path, project?.root ?? null, formatGuardOptions(settings).doNotFormat)) return false;
   await whenSynced(view);
+  if (!current()) return false;
   const state = view.state;
   const range = { start: offsetToPos(state.doc, from), end: offsetToPos(state.doc, to) };
   const options = formatOptionsOf(state);
   let edits;
   try {
-    edits = await lspRequest(() => commands.lspFormat(doc.doc, range, options));
+    edits = await lspRequest(() => commands.lspFormat(doc.doc, range, options), current);
   } catch {
     return false;
   }
-  if (view.state.doc !== state.doc) return false;
+  if (!current()) return false;
   // Only inside the range: some servers answer a range request with whole-file edits.
   const changes = textEditsToChanges(state.doc, edits).filter(
     (c) => c.from >= from && c.to <= to && state.sliceDoc(c.from, c.to) !== c.insert,

@@ -15,6 +15,60 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Formatter freshness slice 234 (frontend source accepted; not packaged):
+FEAT-018/066: a delayed formatter response applied edits after the editor's path,
+document identity or read-only metadata changed while its Text object stayed the
+same. The tracked regression reproduces six failures and four controls across
+Reformat Code and generated-line formatting. Both entry points now capture the
+editor context, Text identity, project/settings scope, LightEdit/opening state and
+indent options. They verify live writability and freshness after local sync,
+through the real IPC wanted guard after global sync, and before applying results.
+A stale first range prevents later range requests; errors from retired contexts
+cannot trigger an unrelated formatter-install prompt. Ordinary selection changes
+remain allowed. Existing formatting hints, undo grouping, keymaps and layout stay
+intact; no new user-visible strings or IPC types are introduced.
+
+The 66 new regression cases include actual DocumentManager/EditorSlot relocation
+and read-only transitions, metadata/text/project/settings/indent changes, both
+sync barriers, multiple ranges, unrelated selection and retired tool errors.
+All 100 focused formatter tests pass. Four controlled workbench browser cases
+exercise Find Action discovery and the registered Reformat Code action with a
+held IPC reply: unchanged formatting applies; real MemoryBackend document moves,
+typing and project switching retire old edits. The initial browser assertion
+looked for the active editor after project switching, which correctly closed it;
+the accepted check retains the original view and proves its text stays unchanged.
+This is browser/client evidence, not native GUI or native Save As acceptance.
+
+Fresh frontend checks pass types, lint, formatting, Knip, 14,669 tests with eight
+existing skips, production build/Safari compatibility, 23 formatter/Laravel/dialog
+browser cases, active-engine verification and Rust formatting. Unchanged Rust,
+engine, IPC and resource evidence is reused from slice 233: workspace 5,632 passed,
+265 ignored and exactly 11 existing exclusions; workspace all-target Clippy and
+139 actual engine client/Host cases. All prior non-document source hashes except
+the single changed formatter TypeScript module match; the only new source files
+are the frontend regression and browser test. Rust/engine are not rebuilt or
+reported as freshly tested in this slice.
+
+A separate controlled before-commit probe passes its unchanged control but still
+calls applyWorkspaceEdit after the document version changes, without carrying an
+input revision witness. This headless disk-writing path is not fixed here and is
+the next slice: capture/validate actual buffer, disk and project state through
+backend edit guards, not just a frontend post-response comparison. The probe does
+not establish a native disk overwrite. Broader profile/configuration, tool-process
+cancellation and native cases remain unaccepted; no whole-area pass is claimed.
+
+App 121/main/engine bytes and deep/strict signature stay unchanged; it does not
+contain this frontend fix. Package a cohesive client build after the headless
+follow-up. No new native compiler output is created. Removed frontend dist:
+73,747,477 bytes. Only the existing App 121 and latest six accepted Rust regression
+executables remain; source pins, licenses, WIT, both stashes and existing profiles
+are preserved. Native GUI remains user-skipped. Installation, migration,
+notarization, publishing, updater activation and debugger expansion remain
+outside this slice. All 69 areas retain 67 partial and two user-deferred statuses.
+Evidence: artifacts/checks/slice234/{gates,reused-evidence,before-commit-reproduction,
+acceptance}.json and red/green/browser/probe logs. Normal commit/push and remote
+equality are recorded in the delivery receipt.
+
 Translation catalog first-save slice 233 (regression acceptance):
 FEAT-001/015/031/066/068: four real Host cases now cover an untitled PHP or JSON
 translation catalog saved into its first Laravel path, with cold and warm PHP

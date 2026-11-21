@@ -233,7 +233,7 @@ impl LspManager {
         self.query_json_translation_resource(receipt, cancel).await
     }
 
-    async fn composer_resource_inputs(
+    pub(super) async fn composer_resource_inputs(
         &self,
         composer: &Path,
         resource: &Path,
@@ -269,7 +269,30 @@ impl LspManager {
         target: &Target,
         cancel: &CancellationToken,
     ) -> IdeResult<PhpJsonTranslationResource> {
-        self.retire_unselected_provider_sources(target, composer);
+        let provider_capability = providers::supported(&target.caps());
+        let prepared = async {
+            self.reconcile_provider_sources(target, composer, cancel).await?;
+            let receipt = self.query_composer_resource_on_target(composer, resource, source, target, cancel).await?;
+            self.synchronize_provider_sources(receipt, cancel).await
+        }
+        .await;
+        prepared.map_err(|mut error| {
+            // Unverifiable provider ownership must not fall back to older disk registrations.
+            if provider_capability && error.kind == ErrorKind::InvalidInput {
+                error.kind = ErrorKind::OutOfSync;
+            }
+            error
+        })
+    }
+
+    pub(super) async fn query_composer_resource_on_target(
+        &self,
+        composer: &Path,
+        resource: &Path,
+        source: &DocSnap,
+        target: &Target,
+        cancel: &CancellationToken,
+    ) -> IdeResult<PhpJsonTranslationResource> {
         let (inputs, revision) = self.composer_resource_inputs(composer, resource, cancel).await?;
         let sources = self.navigation_sources(source, target)?;
         if sources.files_revision != revision || !self.execution_allowed.load(Ordering::Acquire) {
@@ -285,20 +308,7 @@ impl LspManager {
             sources,
             composer: Some(Arc::new(inputs)),
         };
-        let provider_capability = providers::supported(&target.caps());
-        let prepared = async {
-            let receipt = self.query_json_translation_resource(receipt, cancel.clone()).await?;
-            self.synchronize_provider_sources(receipt, cancel).await
-        }
-        .await;
-        prepared.map_err(|mut error| {
-            // An unverifiable provider cannot be treated as an unrelated catalog:
-            // continuing would silently answer from its older disk registration.
-            if provider_capability && error.kind == ErrorKind::InvalidInput {
-                error.kind = ErrorKind::OutOfSync;
-            }
-            error
-        })
+        self.query_json_translation_resource(receipt, cancel.clone()).await
     }
 
     pub(super) async fn current_composer_resource_query(

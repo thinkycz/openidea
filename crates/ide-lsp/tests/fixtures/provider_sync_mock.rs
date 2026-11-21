@@ -405,3 +405,103 @@ async fn json_provider_sync_without_catalogs_preserves_legacy_and_metadata_only_
         f.h.mgr.shutdown_all().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_provider_sync_keeps_only_current_live_consumers_on_a_shared_peer() {
+    let mut capabilities = caps();
+    capabilities["experimental"]["phpWorkbenchProviderSources"] = json!(true);
+    capabilities["experimental"]["phpWorkbenchProviderSourceSync"] = json!(true);
+    let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+    let shared = h.root.join("shared");
+    for name in ["apps/a", "apps/b", "shared"] {
+        std::fs::create_dir_all(h.root.join(name)).unwrap();
+    }
+    std::fs::write(h.root.join("mock.toml"), "").unwrap();
+    std::fs::write(shared.join("mock.toml"), "").unwrap();
+    for name in ["apps/a", "apps/b"] {
+        std::fs::write(h.root.join(name).join("composer.json"), r#"{"require":{"laravel/framework":"13.37.0"}}"#)
+            .unwrap();
+    }
+    std::fs::write(shared.join("composer.json"), r#"{"name":"fixture/shared"}"#).unwrap();
+    h.mgr.set_content_roots(vec![h.root.clone(), shared.clone()]);
+    let target = h.launcher.state_for_root("phpantom", &h.root);
+    let start = Arc::new(Gate::default());
+    *target.initialize_gate.lock() = Some(start.clone());
+    *h.launcher.state_for_root("phpantom", &shared).caps.lock() = incremental_caps();
+    let first = shared.join("First.php");
+    let second = shared.join("Second.php");
+    for path in [&first, &second] {
+        std::fs::write(path, PROVIDER).unwrap();
+        h.mgr.did_open(DocId::next(), path, &h.lang, 1, DIRTY);
+    }
+    let (_, private) = h.open("shared/Private.php", "<?php /* unrelated private */");
+    let (a, _) = h.open("apps/a/Caller.php", CALLER);
+    let (b, _) = h.open("apps/b/Caller.php", CALLER);
+    let a_manifest = h.root.join("apps/a/composer.json");
+    let allow_a = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let registered = allow_a.clone();
+    let unresolved_a = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let unresolved = unresolved_a.clone();
+    let limited_a = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let limited = limited_a.clone();
+    let p = first.clone();
+    let q = second.clone();
+    target.responder.lock().replace(Arc::new(move |state,method,params| {
+        let docs=state.docs.lock();
+        match method {
+            METHOD => {
+                let is_a=params["projectUri"]==uri_of(&a_manifest);
+                let path=if is_a {&p} else {&q};
+                let text=docs.get(&uri_of(path)).map_or(PROVIDER,String::as_str);
+                let providers=if is_a && (!registered.load(Ordering::SeqCst) || unresolved.load(Ordering::SeqCst)) {vec![]} else {vec![json!({"className":if is_a {"Shared\\First"} else {"Shared\\Second"},"uri":uri_of(path),"sha256":format!("{:x}",sha2::Sha256::digest(text.as_bytes()))})]};
+                let mut reply=echo(params,None);reply["providerSources"]=json!({"providers":providers,"unresolved":if is_a && unresolved.load(Ordering::SeqCst) {vec!["Shared\\First"]} else {vec![]},"limited":is_a && limited.load(Ordering::SeqCst)});Some(reply)
+            },
+            "textDocument/hover" => {let path=if params["textDocument"]["uri"].as_str().unwrap().contains("/apps/a/") {&p} else {&q};Some(json!({"contents":{"kind":"markdown","value":docs.get(&uri_of(path)).cloned().unwrap_or_else(||PROVIDER.into())}}))},
+            _=>None,
+        }
+    }));
+    start.open();
+    for caller in [a, b, a] {
+        assert_eq!(
+            h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap().unwrap().contents.value,
+            DIRTY
+        );
+    }
+    assert_eq!(h.mgr.servers().len(), 2, "both consumers share one peer; provider files use the other");
+    assert_eq!(target.docs.lock().get(&uri_of(&first)).cloned(), Some(DIRTY.into()));
+    assert_eq!(
+        target.docs.lock().get(&uri_of(&second)).cloned(),
+        Some(DIRTY.into()),
+        "switching live contexts must not close an independently declared provider"
+    );
+    assert!(!target.docs.lock().contains_key(&uri_of(&private)));
+    unresolved_a.store(true, Ordering::SeqCst);
+    h.mgr.hover(b, Pos::new(0, 10), Default::default()).await.unwrap();
+    assert_eq!(
+        target.docs.lock().get(&uri_of(&first)).cloned(),
+        Some(DIRTY.into()),
+        "an unresolved registered class must not restore the disk provider"
+    );
+    let closes = target.notified("textDocument/didClose").len();
+    limited_a.store(true, Ordering::SeqCst);
+    assert!(
+        h.mgr.hover(b, Pos::new(0, 10), Default::default()).await.is_err(),
+        "a limited inventory cannot prove old ownership expired"
+    );
+    assert_eq!(target.notified("textDocument/didClose").len(), closes);
+    limited_a.store(false, Ordering::SeqCst);
+    unresolved_a.store(false, Ordering::SeqCst);
+    h.mgr.hover(b, Pos::new(0, 10), Default::default()).await.unwrap();
+    allow_a.store(false, Ordering::SeqCst);
+    h.mgr.hover(b, Pos::new(0, 10), Default::default()).await.unwrap();
+    assert!(
+        !target.docs.lock().contains_key(&uri_of(&first)),
+        "re-query the other live consumer before retaining its provider"
+    );
+    h.mgr.did_close(a);
+    assert_eq!(h.mgr.hover(b, Pos::new(0, 10), Default::default()).await.unwrap().unwrap().contents.value, DIRTY);
+    assert!(!target.docs.lock().contains_key(&uri_of(&first)));
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), PROVIDER);
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), PROVIDER);
+    h.mgr.shutdown_all().await;
+}

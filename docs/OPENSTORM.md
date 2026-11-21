@@ -15,6 +15,63 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Checked shared-peer provider ownership slice 228 (2026-11-21; client/Host accepted):
+FEAT-031/066/067/068: switching Composer consumers on a shared PHP peer no
+longer automatically closes another live consumer's checked provider buffers.
+Before retaining old ownership, the client finds a current primary PHP source
+for that Composer selector and re-queries its source metadata through the same
+checked manifest/document path. The ownership query is content-free and forwards
+no new buffer. Sources absent from the current declarations retire; a registered
+class reported unresolved retains its previously proved preferred source, so
+class withdrawal cannot restore stale disk registrations. Limited source inventories
+refuse an ownership decision without closing those copies. Completed ownership
+receipts are checked together before retiring exact matching leases. Public
+metadata APIs remain read-only. No UI, settings or engine change is introduced.
+
+The shared-peer protocol test first fails because selecting another live project
+closes its independently declared provider. All 99 JSON protocol regressions now
+pass, including shared consumers, registration withdrawal, unresolved classes,
+limited replies, inactive consumers, legacy negotiation and previous lifecycle/
+cancellation controls. The expanded real fixture uses two Composer consumers on
+one PHP peer and managed foreign providers on the other. PHP files/drafts and
+Composer/JSON are validated, including separate Laravel13.37 FileLoader runtime
+assertions. Ordinary hover uses each unsaved provider. Content-free traces show
+both provider copies survive A/B/A navigation, while unrelated PHP stays private.
+Removing a provider class, selecting the other consumer, and navigating back does
+not restore its disk registration; restoration recovers both values. Closing the
+last consumer withdraws its copy while the other continues. Disk PHP/JSON stay
+unchanged, no probe file is created, and all three owned engine processes exit.
+The focused real workflow and all 75 client +62 Host cases pass on signed inactive
+engine 191. Candidate source/pins/binaries are unchanged; prior engine-only acceptance
+is explicitly reused.
+
+Fresh Rust workspace gates pass 5,632 /263 ignored /the same11 exclusions,
+all-target Clippy with warnings denied, formatting, bindings fidelity and default
+engine provenance. Fresh frontend types/lint/format/Knip, 14,603 tests/eight
+skips, production/Safari compatibility and59 browser cases pass after the separate
+Vue test-readiness repair recorded below. Its initial failure and controlled
+RED/GREEN evidence are retained. One needless fixture-argument borrow was
+corrected for Clippy; its initial failed check is retained in rust-initial/. Native GUI checks remain user-skipped. App119/
+default185 stay unchanged; no promotion or full-area acceptance is claimed.
+
+Latest regression executables replace 877,598,256 bytes
+of older payload. Removed 10028 files, 16.7GiB total. Frontend dist is removed, and all six
+retained executables launch after cleanup. Source/provenance/evaluation assets
+and both stashes remain. Delivery checkpoint metadata now records engine191/
+current client228; older206/208 checkpoints remain in the history chain, and
+App119 remains the current package. All69 areas stay67 partial/two user-deferred. Normal
+commit/push and remote verification are recorded in the ignored receipt.
+
+Remaining: preparing every shared consumer together in background (the existing
+multi-context no-catalog refusal is retained); broader provider graphs and fixed
+points; new unsaved provider files without disk identity; wider physical/service/
+concurrent cases, performance measurements, packaging and native acceptance.
+Editor aliases still refuse provider synchronization. This ownership slice does
+not claim complete shared-project background synchronization. Evidence:
+artifacts/checks/slice228/{gates,frontend-gates,evaluation,real-current-green,
+vue-readiness-repair,frozen-runtimes,retention,retained-runtime-lists}.json plus
+protocol/real traces and red/green logs.
+
 Vue indentation test readiness repair (2026-11-21; test-only):
 The first slice228 frontend run reports 14,602 passed/eight skipped and one
 unchanged Vue indentation assertion failure: closing script indentation is two

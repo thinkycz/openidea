@@ -6,13 +6,127 @@ pub(super) fn supported(caps: &ServerCaps) -> bool {
 }
 
 impl LspManager {
-    pub(super) fn retire_unselected_provider_sources(&self, target: &Target, project: &Path) {
-        self.retire_json_resources_in(&mut self.docs.lock(), |_, _, _, attached| {
+    // One PHP peer can serve several live Composer projects. Revalidate their
+    // existing ownership before withdrawing a previously admitted provider copy.
+    pub(super) async fn reconcile_provider_sources(
+        &self,
+        target: &Target,
+        project: &Path,
+        cancel: &CancellationToken,
+    ) -> IdeResult<()> {
+        if !supported(&target.caps()) {
+            self.retire_json_resources_in(&mut self.docs.lock(), |_, _, _, attached| {
+                attached.server.id == target.server.id
+                    && attached.resource.as_ref().is_some_and(|resource| resource.provider)
+            });
+            return Ok(());
+        }
+        let (owners, consumers) = {
+            let docs = self.docs.lock();
+            let mut owners = std::collections::BTreeMap::<_, Vec<_>>::new();
+            let mut consumers = Vec::new();
+            for (id, doc) in docs.iter() {
+                for attached in &doc.servers {
+                    if attached.server.id != target.server.id || attached.opened_gen != Some(target.run.generation) {
+                        continue;
+                    }
+                    match &attached.resource {
+                        Some(resource) if resource.provider && resource.selector != project => {
+                            owners.entry(resource.selector.clone()).or_default().push((
+                                *id,
+                                doc.path.clone(),
+                                resource.witness.clone(),
+                            ));
+                        }
+                        None if doc.language.as_str() == "php"
+                            && doc.notebook.is_none()
+                            && doc.uri == uri::path_to_uri(&doc.path) =>
+                        {
+                            consumers.push((*id, doc.path.clone()))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (owners, consumers)
+        };
+        if owners.is_empty() {
+            return Ok(());
+        }
+        let mut decisions = Vec::new();
+        let mut checked = Vec::new();
+        for (selector, resources) in owners {
+            let mut source = None;
+            for (doc, path) in &consumers {
+                if !selector.parent().is_some_and(|root| path.starts_with(root)) {
+                    continue;
+                }
+                match self.json_resource_manifest(path, cancel).await {
+                    Ok(Some(manifest)) if manifest == selector => {
+                        if let Ok(current) = self.snapshot(*doc)
+                            && current.path == *path
+                            && current.language.as_str() == "php"
+                        {
+                            source = Some(current);
+                            break;
+                        }
+                    }
+                    _ if cancel.is_cancelled() => return Err(IdeError::cancelled()),
+                    _ => {}
+                }
+            }
+            let receipt = if let Some(source) = source {
+                let probe = source.path.with_extension("json");
+                if self.composer_resource_inputs(&selector, &probe, cancel).await.is_ok() {
+                    let receipt =
+                        self.query_composer_resource_on_target(&selector, &probe, &source, target, cancel).await?;
+                    if receipt.provider_sources.as_ref().is_none_or(|sources| sources.limited) {
+                        return Err(IdeError::cancelled());
+                    }
+                    Some(receipt)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            for (doc, path, witness) in resources {
+                // A temporarily unresolved registered class still needs its preferred buffer.
+                let keep =
+                    receipt.as_ref().and_then(|receipt| receipt.provider_sources.as_ref()).is_some_and(|sources| {
+                        sources.providers.iter().any(|provider| provider.path == path)
+                            || witness.provider_sources.as_ref().is_some_and(|previous| {
+                                previous.providers.iter().any(|provider| {
+                                    provider.path == path
+                                        && sources
+                                            .unresolved
+                                            .iter()
+                                            .any(|name| name.eq_ignore_ascii_case(&provider.class_name))
+                                })
+                            })
+                    });
+                decisions.push((doc, witness, keep));
+            }
+            if let Some(receipt) = receipt {
+                checked.push(receipt);
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(IdeError::cancelled());
+        }
+        for receipt in &checked {
+            self.php_json_translation_resource_current(receipt, cancel.clone()).await?;
+        }
+        self.retire_json_resources_in(&mut self.docs.lock(), |doc, _, _, attached| {
             attached.server.id == target.server.id
                 && attached.resource.as_ref().is_some_and(|resource| {
-                    resource.provider && (resource.selector != project || !supported(&target.caps()))
+                    resource.provider
+                        && decisions.iter().any(|(owner, witness, keep)| {
+                            *owner == doc && !keep && Arc::ptr_eq(witness, &resource.witness)
+                        })
                 })
         });
+        Ok(())
     }
 
     fn provider_source_candidates(&self, receipt: &PhpJsonTranslationResource) -> IdeResult<Vec<DocSnap>> {

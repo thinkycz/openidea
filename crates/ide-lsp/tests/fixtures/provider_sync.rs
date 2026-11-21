@@ -5,6 +5,10 @@ use sha2::{Digest, Sha256};
 const COMPOSER: &str = r#"{"require":{"php":"^8.3","laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"src/","Shared\\":"../shared/src/"}}}"#;
 const PROVIDER: &str = r#"<?php namespace Shared; class Provider extends \Illuminate\Support\ServiceProvider {public function boot(): void {$this->loadJsonTranslationsFrom(__DIR__.'/../json');}}"#;
 const CALLER: &str = "<?php namespace App; class Caller {public function greet(): string {return __('Greeting 😀');}}";
+const SECOND_PROVIDER: &str = r#"<?php namespace Shared; class SecondProvider extends \Illuminate\Support\ServiceProvider {public function boot(): void {$this->loadJsonTranslationsFrom(__DIR__.'/../json-b');}}"#;
+const SECOND_CALLER: &str =
+    "<?php namespace Second; class Caller {public function greet(): string {return __('Greeting B 😀');}}";
+const SECOND_COMPOSER: &str = r#"{"require":{"php":"^8.3","laravel/framework":"13.37.0"},"autoload":{"psr-4":{"Second\\":"src/","Shared\\":"../../shared/src/"}}}"#;
 const ORIGINAL: &str = r#"{"Greeting 😀":"Private original"}"#;
 const ALTERNATE: &str = r#"{"Greeting 😀":"Private alternate"}"#;
 
@@ -78,6 +82,12 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
         ("app/bootstrap/providers.php", "<?php return [Shared\\Provider::class];"),
         ("app/src/Caller.php", CALLER),
         ("shared/composer.json", r#"{"name":"acme/shared","autoload":{"psr-4":{"Shared\\":"src/"}}}"#),
+        ("app/consumer/composer.json", SECOND_COMPOSER),
+        ("app/consumer/bootstrap/providers.php", "<?php return [Shared\\SecondProvider::class];"),
+        ("app/consumer/src/Caller.php", SECOND_CALLER),
+        ("shared/src/SecondProvider.php", SECOND_PROVIDER),
+        ("shared/json-b/en.json", r#"{"Greeting B 😀":"Disk B original"}"#),
+        ("shared/alternate-b/en.json", r#"{"Greeting B 😀":"Disk B alternate"}"#),
         ("shared/src/Provider.php", PROVIDER),
         ("shared/src/Private.php", "<?php namespace Shared; class PrivateSource {}"),
         ("shared/json/en.json", r#"{"Greeting 😀":"Disk original"}"#),
@@ -93,12 +103,18 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
             serde_json::from_str::<serde_json::Value>(text).unwrap();
         }
     }
-    for project in [&app, &shared] {
+    for project in [&app, &app.join("consumer"), &shared] {
         std::os::unix::fs::symlink(&vendor, project.join("vendor")).unwrap();
     }
     let runtime = std::process::Command::new(&php).args(["-n","-d","zend.assertions=1","-d","assert.exception=1","-r",r#"require $argv[1].'/vendor/autoload.php'; foreach(['json'=>'Disk original','alternate'=>'Disk alternate'] as $dir=>$expected) { $loader=new Illuminate\Translation\FileLoader(new Illuminate\Filesystem\Filesystem, $argv[1].'/lang'); $loader->addJsonPath($argv[2].'/'.$dir); $translator=new Illuminate\Translation\Translator($loader,'en'); assert($translator->get('Greeting 😀')===$expected); } echo 'fixture passed';"#]).arg(&app).arg(&shared).output().unwrap();
     assert!(runtime.status.success(), "{}", String::from_utf8_lossy(&runtime.stderr));
     assert_eq!(runtime.stdout, b"fixture passed");
+    let runtime_b = std::process::Command::new(&php).args(["-n","-d","zend.assertions=1","-d","assert.exception=1","-r",r#"require $argv[1].'/vendor/autoload.php'; foreach(['json-b'=>'Disk B original','alternate-b'=>'Disk B alternate'] as $dir=>$expected) { $loader=new Illuminate\Translation\FileLoader(new Illuminate\Filesystem\Filesystem, $argv[1].'/lang'); $loader->addJsonPath($argv[2].'/'.$dir); $translator=new Illuminate\Translation\Translator($loader,'en'); assert($translator->get('Greeting B 😀')===$expected); } echo 'fixture passed';"#]).arg(app.join("consumer")).arg(&shared).output().unwrap();
+    assert!(runtime_b.status.success(), "{}", String::from_utf8_lossy(&runtime_b.stderr));
+    assert_eq!(runtime_b.stdout, b"fixture passed");
+    for project in [&app, &shared] {
+        std::fs::write(project.join(".provider-fixture-root"), "").unwrap();
+    }
     let engine = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").expect("pinned PHPantom"));
     let control = root.join("control");
     std::fs::create_dir(&control).unwrap();
@@ -106,6 +122,7 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
     std::fs::write(&proxy, include_str!("phpantom-provider-trace.py")).unwrap();
     let mut language = route_handler_language(&engine);
     let config = &mut language.language_servers[0];
+    config.root_markers = vec![".provider-fixture-root".into()];
     let arguments = std::mem::take(&mut config.args);
     config.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
     config.args = vec![
@@ -308,7 +325,97 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
         assert_eq!(std::fs::read_to_string(&original_path).unwrap(), r#"{"Greeting 😀":"Disk original"}"#);
         assert_eq!(std::fs::read_to_string(&alternate_path).unwrap(), r#"{"Greeting 😀":"Disk alternate"}"#);
         assert!(!app.join("src/Caller.json").exists(), "dependency discovery must not create a probe file");
+        let group_start = events(&control).len();
+        let second_provider = DocId::next();
+        let second_caller = DocId::next();
+        let second_source = shared.join("src/SecondProvider.php");
+        let second_path = app.join("consumer/src/Caller.php");
+        let second_dirty = SECOND_PROVIDER.replace("../json-b", "../alternate-b");
+        syntax_text(&php, &second_dirty);
+        mgr.did_open(provider, &source, &LanguageId::new("php"), 7, &dirty);
+        mgr.did_open(second_provider, &second_source, &LanguageId::new("php"), 1, &second_dirty);
+        mgr.did_open(second_caller, &second_path, &LanguageId::new("php"), 1, SECOND_CALLER);
+        for (doc, text, expected) in [
+            (caller, CALLER, "Disk alternate"),
+            (second_caller, SECOND_CALLER, "Disk B alternate"),
+            (caller, CALLER, "Disk alternate"),
+        ] {
+            let key = if doc == caller { "Greeting 😀" } else { "Greeting B 😀" };
+            let hover = mgr.hover(doc, pos(text, key), Default::default()).await.unwrap().unwrap();
+            assert!(hover.contents.value.contains(expected), "{hover:?}");
+        }
+        assert_eq!(mgr.servers().len(), 2, "both Composer consumers must use one actual PHP peer");
+        let log = events(&control);
+        for path in [&source, &second_source] {
+            assert!(log[group_start..].iter().any(|event| event_at(event, &app, "textDocument/didOpen", path)));
+            assert!(
+                !log[group_start..].iter().any(|event| event_at(event, &app, "textDocument/didClose", path)),
+                "switching live contexts must keep checked provider ownership"
+            );
+        }
+        let removed = "<?php namespace Shared; class Other {}";
+        syntax_text(&php, removed);
+        replace(&mgr, provider, 8, &dirty, removed);
+        let first = mgr
+            .hover(caller, pos(CALLER, "Greeting 😀"), Default::default())
+            .await
+            .unwrap()
+            .map(|h| h.contents.value)
+            .unwrap_or_default();
+        assert!(!first.contains("Disk alternate") && !first.contains("Disk original"));
+        assert!(
+            mgr.hover(second_caller, pos(SECOND_CALLER, "Greeting B 😀"), Default::default())
+                .await
+                .unwrap()
+                .unwrap()
+                .contents
+                .value
+                .contains("Disk B alternate")
+        );
+        let after_other_consumer = mgr
+            .hover(caller, pos(CALLER, "Greeting 😀"), Default::default())
+            .await
+            .unwrap()
+            .map(|h| h.contents.value)
+            .unwrap_or_default();
+        assert!(
+            !after_other_consumer.contains("Disk alternate") && !after_other_consumer.contains("Disk original"),
+            "another consumer must not restore a removed provider from disk: {after_other_consumer}"
+        );
+        replace(&mgr, provider, 9, removed, &dirty);
+        for (doc, text, key, expected) in [
+            (caller, CALLER, "Greeting 😀", "Disk alternate"),
+            (second_caller, SECOND_CALLER, "Greeting B 😀", "Disk B alternate"),
+        ] {
+            assert!(
+                mgr.hover(doc, pos(text, key), Default::default())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .contents
+                    .value
+                    .contains(expected)
+            );
+        }
         mgr.did_close(caller);
+        let hover =
+            mgr.hover(second_caller, pos(SECOND_CALLER, "Greeting B 😀"), Default::default()).await.unwrap().unwrap();
+        assert!(hover.contents.value.contains("Disk B alternate"));
+        let log = events(&control);
+        let open = log.iter().rposition(|event| event_at(event, &app, "textDocument/didOpen", &source));
+        let close = log.iter().rposition(|event| event_at(event, &app, "textDocument/didClose", &source));
+        assert!(
+            close.is_some_and(|close| open.is_some_and(|open| close > open)),
+            "closing the last consumer withdraws its provider copy"
+        );
+        assert!(!log.iter().any(|event| event_at(event, &app, "textDocument/didOpen", &private_path)));
+        assert!(!app.join("consumer/src/Caller.json").exists());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), PROVIDER);
+        assert_eq!(std::fs::read_to_string(&second_source).unwrap(), SECOND_PROVIDER);
+        assert_eq!(std::fs::read_to_string(app.join("consumer/composer.json")).unwrap(), SECOND_COMPOSER);
+        mgr.did_close(second_caller);
+        mgr.did_close(second_provider);
+        mgr.did_close(provider);
         mgr.did_close(private);
     })
     .catch_unwind()

@@ -789,6 +789,72 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             assert_eq!(targets[0].range, key_range(overlay, "Greeting 😀"));
         }
         assert_eq!(opens(), opens_before_navigation, "normal Host navigation reuses the current admitted catalog");
+        let bootstrap = f.root.join("bootstrap/providers.php");
+        let original_bootstrap = extra.iter().find(|(name, _)| name == "bootstrap/providers.php").unwrap().1.as_str();
+        let dependency_frames = || {
+            std::fs::read_to_string(control.join("events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .collect::<Vec<_>>()
+        };
+        for (registered, text) in [(false, "<?php return [];"), (true, original_bootstrap)] {
+            let start = dependency_frames().len();
+            std::fs::write(&bootstrap, text).unwrap();
+            let lint = std::process::Command::new(std::env::var_os("OPENSTORM_TEST_PHP_BIN").expect("owned PHP"))
+                .args(["-n", "-l"])
+                .arg(&bootstrap)
+                .output()
+                .unwrap();
+            assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stderr));
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let all = dependency_frames();
+                    let fresh = &all[start..];
+                    let watched = fresh.iter().rposition(|event| {
+                        event["method"] == "workspace/didChangeWatchedFiles"
+                            && event["uri"] == ide_lsp::path_to_uri_string(&bootstrap)
+                    });
+                    let opened = fresh.iter().rposition(|event| {
+                        event["method"] == "textDocument/didOpen"
+                            && event["uri"] == ide_lsp::path_to_uri_string(&path)
+                            && event["version"] == private_version
+                    });
+                    let closed = frames().last().is_some_and(|event| event["method"] == "textDocument/didClose");
+                    if watched.is_some()
+                        && if registered {
+                            watched.zip(opened).is_some_and(|(watch, open)| open > watch)
+                        } else {
+                            closed
+                        }
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("actual closed-dependency watcher changes reconcile before PHP commands");
+            let hover = ide_host::ops::lsp::lsp_hover(
+                &f.host,
+                "main",
+                RequestId::next(),
+                f.doc,
+                key_range(caller, "Greeting 😀").start,
+            )
+            .await
+            .unwrap();
+            if registered {
+                assert!(hover.unwrap().contents.value.contains("Private overlay"));
+            } else if let Some(hover) = hover {
+                assert!(!hover.contents.value.contains("Private overlay"));
+            }
+            assert_eq!(
+                f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid,
+                pid_before_reconfiguration
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&bootstrap).unwrap(), original_bootstrap);
         let before_edit = opens();
         f.project.documents.replace_all(catalog.id, updated).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {

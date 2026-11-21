@@ -15,6 +15,87 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+External dependency catalog recovery slice 223 (2026-11-21; client/Host accepted; candidate 189 inactive):
+FEAT-031/066/067: PHP file-change publication now rediscovers existing JSON
+catalogs after its watcher notifications. Discovery uses every current active
+consuming context, replacing retained refreshes limited to an earlier selected
+project. It can recover when a foreground PHP action cancelled negative discovery
+and no persistent catalog exists, and refuses readmission when another consumer
+has become positive. The existing publication guard spans notification and
+rediscovery scheduling; its release wakes fresh attempts.
+
+The hook only enumerates running servers and retains PHPantom/capability,
+execution, active-PHP-consumer and content-root checks. It cannot boot PHP from
+JSON. Empty or coalesced reviewed-write echoes still return before notification
+and discovery. Typed input snapshots, source/Composer/disk witnesses, debounce,
+foreground priority, cancellation and server-generation checks remain. No public
+command, protocol, setting or UI changes are introduced.
+
+A public regression reproduces lost recovery after a negative catalog lookup and
+PHP hover, then a closed provider is created. Three added regression groups cover
+created/changed/removed dependencies, Composer changes, reviewed edits and echo
+coalescing; newly ambiguous consumers and later unique recovery; held admission,
+foreground supersession, current edited JSON, close, execution revocation,
+restart, duplicate-open refusal, capabilities, alternative servers and JSON-only
+startup. All 84 public JSON regressions and both publication-boundary unit cases
+pass. The mock registration decisions are synthetic and are not engine evidence.
+
+The real client and managed Host fixtures remove and restore the closed
+bootstrap/providers.php list. They observe catalog retirement while unregistered,
+issue a PHP hover to cancel pending negative discovery, then require private
+catalog recovery before another PHP command after restoring the list. The Host
+uses its actual filesystem watcher and requires its watcher frame to precede a
+new private open at the current buffer version. The client publishes through its
+actual manager file-change API. Both lint changed PHP, preserve the actual running
+server PID, check restored bytes and keep the managed provider and JSON buffers.
+Existing Composer, provider, references, save-conflict and recovery checks remain.
+
+Both strengthened real fixtures first fail on engine 188: unregistered catalogs
+still expose the private value. PHPantom ignores watched content changes to
+never-parsed PHP files, including the directly read provider lists. Patch 189
+exempts only the two provider-list paths from that optimization and refreshes
+provider-derived macro/storage, date, resource, morph-map and gate indexes from
+one current provider list within the semantic publication guard. Open buffers
+retain ownership. One new engine regression covers both bootstrap/providers.php
+and config/app.php changes, deletion, recreation, open-buffer precedence and
+close adoption. The corrected canonical temporary-directory invocation reproduces
+its old-engine failure and passes after the fix; earlier URI preflight failures
+are retained separately. Full engine tests pass (18,744 passes,
+17 ignored), along with all-target Clippy including
+mem-audit, formatting, pinned reacquisition and release build. Candidate 189 is
+reproducible from the unchanged upstream commit/archive and 189 checked patches,
+with recorded raw/signed checksums, MIT license and strict ad-hoc signature.
+
+Fresh workspace executables reject query-only engine 187, reproduce both engine
+188 failures, and pass all 72 client and 62 Host cases on signed inactive engine 189. Source, Cargo fingerprint and binary witnesses match; retained fixture originals remain unchanged. Gates pass:
+Rust 5,617 / 260 ignored / the same 11 documented exclusions; workspace all-target
+Clippy with warnings denied; Rust formatting; bindings fidelity; default-engine
+provenance; frontend 14,603 / eight skipped; types/lint/format/Knip; production
+build/Safari compatibility; 59 controlled-browser cases. Temporary test executables
+strip symbols for the disk budget. Debug linking reports 13 instances of the
+existing large-unwind-table warning class. The unchanged recorder retains slice
+215's deterministic overlapping-ID evidence with its hash rechecked. Native GUI
+remains user-skipped. Candidate 189 is inactive and no app is promoted. Source
+acceptance does not establish packaged-app behavior.
+
+The latest 134-case regression set replaces the previous
+875,701,280-byte payload. Cargo cleanup: Removed 19677 files, 21.8GiB total.
+Removed frontend dist (73,745,139 bytes), the owned engine
+compiler tree and disposable engine scratch (3,882,275,129 bytes). All six retained
+executables list their expected tests after cleanup. The sole signed App 119,
+default engine 185, engine provenance, historical receipts and both stashes remain
+preserved. Normal commit, push and remote read-back are tracked in the ignored
+acceptance receipt. All 69 areas remain at 67 partial/two user-deferred.
+
+Next: wider nested or closed consumers, overlays across separate servers and
+catalogs registered by several consuming projects before promotion/packaging. Discovery still uses
+active open PHP consumers. Wider physical/service matrices, concurrent publication
+stress, large-catalog performance and native UI remain unverified. Evidence:
+artifacts/checks/slice223/{gates,frontend-gates,evaluation,focused-real-client,
+focused-real-host,frozen-runtimes,retention,retained-runtime-lists}.json,
+engine-gates, candidate189, scratch-cycle and engine-retention receipts;
+red.log, green-lib.log and green-mock.log.
+
 Mandatory catalog input snapshots slice 222 (2026-11-21; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: every private JSON catalog publication now requires a typed
 managed-input snapshot. The snapshot owns a live preparation-watch receiver and

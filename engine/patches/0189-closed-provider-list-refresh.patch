@@ -1,0 +1,186 @@
+--- a/src/backend/laravel/mod.rs
++++ b/src/backend/laravel/mod.rs
+@@ -135,10 +135,20 @@
+     /// schema index that reads its `Blueprint` macros.
+     pub(crate) fn build_laravel_provider_indexes(&self) {
+         let providers = self.laravel_providers();
+-        self.build_laravel_date_class(&providers);
+-        self.build_provider_resources(&providers);
+-        self.build_laravel_morph_map_index(&providers);
+-        self.build_laravel_gate_index(&providers);
++        self.build_laravel_provider_indexes_with(&providers);
++    }
++
++    fn build_laravel_provider_indexes_with(&self, providers: &LaravelProviders) {
++        self.build_laravel_date_class(providers);
++        self.build_provider_resources(providers);
++        self.build_laravel_morph_map_index(providers);
++        self.build_laravel_gate_index(providers);
++    }
++
++    pub(crate) fn refresh_laravel_provider_list(&self) {
++        let providers = self.laravel_providers();
++        self.build_laravel_macro_index(&providers);
++        self.build_laravel_provider_indexes_with(&providers);
+     }
+ 
+     /// Scan every registered service provider's file into `files`, one
+@@ -186,7 +196,7 @@
+     /// (`bootstrap/providers.php` / `config/app.php`), whose macro-relevant
+     /// references are the provider class list rather than method-body class
+     /// references.
+-    fn is_laravel_provider_list_uri(&self, uri: &str) -> bool {
++    pub(crate) fn is_laravel_provider_list_uri(&self, uri: &str) -> bool {
+         let Some(root) = self.workspace.workspace_root.read().clone() else {
+             return false;
+         };
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -46,7 +46,8 @@
+     /// wasted syscalls on every refocus.
+     ///
+     /// So a plain content change is only acted on for files we have actually
+-    /// parsed (whose cached details would otherwise go stale).  Created and
++    /// parsed (whose cached details would otherwise go stale), plus Laravel's
++    /// directly read provider lists and view configuration. Created and
+     /// deleted files are always handled: a creation makes a new class
+     /// discoverable, and a deletion must purge a now-dangling entry, both of
+     /// which matter even for files we never loaded.
+@@ -64,6 +65,7 @@
+         let mut resource_changes: Vec<(String, PathBuf, FileChangeType)> = Vec::new();
+         let mut view_structure_changes = Vec::new();
+         let mut view_config_changed = false;
++        let mut provider_list_changed = false;
+         let mut migration_discovery =
+             crate::virtual_members::laravel::database_schema::MigrationDiscovery::default();
+         let is_laravel = self.resolved_class_cache.read().is_laravel();
+@@ -206,7 +208,9 @@
+                                 == canonical_path_for_comparison(config))
+                 });
+                 view_config_changed |= is_view_config;
+-                if change.typ == FileChangeType::CHANGED && !is_view_config {
++                let is_provider_list = is_laravel && self.is_laravel_provider_list_uri(&uri_str);
++                provider_list_changed |= is_provider_list;
++                if change.typ == FileChangeType::CHANGED && !is_view_config && !is_provider_list {
+                     // `parsed_uris` records the editor URI for open files and
+                     // the canonical `file://` URI for lazily loaded ones;
+                     // check both spellings.
+@@ -301,6 +305,12 @@
+             }
+         }
+ 
++        // Provider lists are read directly during discovery and need not have
++        // a parsed AST. Refresh their registries even before full indexing.
++        if provider_list_changed {
++            self.refresh_laravel_provider_list();
++        }
++
+         if composer_changed {
+             tracing::info!("PHPantom: composer files changed, rescanning vendor");
+             self.rescan_composer_indexes(root);
+--- a/tests/integration/laravel_translation_keys.rs
++++ b/tests/integration/laravel_translation_keys.rs
+@@ -3079,3 +3079,103 @@
+ async fn registered_json_buffers_survive_composer_reload_and_following_edits() {
+     registered_json_buffer_case("reload").await;
+ }
++
++#[tokio::test]
++async fn closed_provider_lists_retire_and_restore_json_registration_after_watched_changes() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    for (relative, registered, empty) in [
++        (
++            "bootstrap/providers.php",
++            PACKAGE_PROVIDER_LIST,
++            "<?php return [];",
++        ),
++        (
++            "config/app.php",
++            "<?php return ['providers' => [Acme\\Billing\\BillingServiceProvider::class]];",
++            "<?php return ['providers' => []];",
++        ),
++    ] {
++        let (backend, dir, uri, _) = workspace(
++            PACKAGE_COMPOSER,
++            &[
++                (relative, registered),
++                ("packages/billing/src/BillingServiceProvider.php", &provider),
++            ],
++            "",
++        )
++        .await;
++        let path = dir.path().join(relative);
++        let list = Url::from_file_path(&path).unwrap();
++        let target = Url::from_file_path(dir.path().join("packages/billing/json/en.json")).unwrap();
++        assert!(
++            query_json_resource(&backend, &uri, &target)
++                .await
++                .unwrap()
++                .root_uri
++                .is_some()
++        );
++        for (text, typ, expected) in [
++            (Some(empty), FileChangeType::CHANGED, false),
++            (Some(registered), FileChangeType::CHANGED, true),
++            (None, FileChangeType::DELETED, false),
++            (Some(registered), FileChangeType::CREATED, true),
++        ] {
++            if let Some(text) = text {
++                std::fs::write(&path, text).unwrap();
++            } else {
++                std::fs::remove_file(&path).unwrap();
++            }
++            backend
++                .did_change_watched_files(DidChangeWatchedFilesParams {
++                    changes: vec![FileEvent {
++                        uri: list.clone(),
++                        typ,
++                    }],
++                })
++                .await;
++            assert_eq!(
++                query_json_resource(&backend, &uri, &target)
++                    .await
++                    .unwrap()
++                    .root_uri
++                    .is_some(),
++                expected,
++                "{relative}: {typ:?}"
++            );
++        }
++        crate::common::open_php(&backend, &list, registered).await;
++        std::fs::write(&path, empty).unwrap();
++        backend
++            .did_change_watched_files(DidChangeWatchedFilesParams {
++                changes: vec![FileEvent {
++                    uri: list.clone(),
++                    typ: FileChangeType::CHANGED,
++                }],
++            })
++            .await;
++        assert!(
++            query_json_resource(&backend, &uri, &target)
++                .await
++                .unwrap()
++                .root_uri
++                .is_some(),
++            "open editor owns {relative}"
++        );
++        backend
++            .did_close(DidCloseTextDocumentParams {
++                text_document: TextDocumentIdentifier { uri: list },
++            })
++            .await;
++        assert!(
++            query_json_resource(&backend, &uri, &target)
++                .await
++                .unwrap()
++                .root_uri
++                .is_none()
++        );
++        assert!(!target.to_file_path().unwrap().exists());
++    }
++}

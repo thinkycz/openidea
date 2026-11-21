@@ -6,6 +6,247 @@ const MANIFEST: &str = r#"{"require":{"laravel/framework":"13.37.0"}}"#;
 const TEXT: &str = r#"{"Greeting 😀":"Private draft"}"#;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn registered_json_external_changes_recheck_every_consuming_context_before_readmission() {
+    let mut capabilities = caps();
+    capabilities["experimental"]["phpWorkbenchRenameChecked"] = json!(true);
+    let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let nested = h.root.join("consumers/other");
+    std::fs::create_dir_all(&nested).unwrap();
+    let second = nested.join("composer.json");
+    std::fs::write(&second, MANIFEST).unwrap();
+    let second_uri = uri_of(&second);
+    let dependency = nested.join("Provider.php");
+    std::fs::write(&dependency, "<?php /* not registered */").unwrap();
+    let path = h.root.join("catalogs/en.json");
+    let resource = path.clone();
+    let ambiguous = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let positive = ambiguous.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |_, method, params| {
+        (method == METHOD).then(|| {
+            echo(
+                params,
+                (params["projectUri"] != second_uri || positive.load(Ordering::SeqCst))
+                    .then(|| resource.parent().unwrap()),
+            )
+        })
+    }));
+    let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    h.open("consumers/other/Caller.php", "<?php __('Greeting 😀');");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap();
+    let before = state.requested(METHOD).len();
+    ambiguous.store(true, Ordering::SeqCst);
+    std::fs::write(&dependency, "<?php /* now also registered */").unwrap();
+    h.mgr.php_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+    eventually(|| state.requested(METHOD).len() >= before + 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!state.docs.lock().contains_key(&uri_of(&path)), "a newly positive second context is ambiguous");
+    ambiguous.store(false, Ordering::SeqCst);
+    std::fs::write(&dependency, "<?php /* no longer registered */").unwrap();
+    h.mgr.php_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    assert_eq!(state.requested("textDocument/hover").len(), 1);
+    assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+    assert!(!path.exists());
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_external_discovery_keeps_foreground_priority_and_lifecycle_boundaries() {
+    let isolated = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    isolated.mgr.did_open(DocId::next(), &isolated.root.join("catalogs/en.json"), &LanguageId::new("json"), 1, TEXT);
+    isolated.mgr.php_files_changed(&[isolated.root.join("Provider.php")], &[], &[]);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(isolated.mgr.servers().is_empty(), "watcher changes cannot boot PHP from JSON alone");
+    isolated.mgr.shutdown_all().await;
+    for (name, advertised) in [("phpantom", false), ("phpactor", true), ("intelephense", true)] {
+        let mut capabilities = if advertised { caps() } else { incremental_caps() };
+        capabilities["experimental"]["phpWorkbenchRenameChecked"] = json!(true);
+        let h = harness_for("php", "php", &[(name, capabilities)], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status(name, ServerStatus::Ready).await;
+        h.mgr.did_open(DocId::next(), &h.root.join("catalogs/en.json"), &LanguageId::new("json"), 1, TEXT);
+        h.mgr.php_files_changed(&[h.root.join("Provider.php")], &[], &[]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(h.launcher.state(name).requested(METHOD).is_empty());
+        assert_eq!(h.launcher.state(name).launches.load(Ordering::SeqCst), 1);
+        h.mgr.shutdown_all().await;
+    }
+    for action in ["foreground", "edit", "close", "disable", "restart"] {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchRenameChecked"] = json!(true);
+        let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let dependency = h.root.join("Provider.php");
+        std::fs::write(&dependency, "<?php /* before */").unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let active = registered.clone();
+        let hold_next = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hold = hold_next.clone();
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+            METHOD => {
+                if hold.swap(false, Ordering::SeqCst) { held.hold(); }
+                Some(echo(params, active.load(Ordering::SeqCst).then(|| resource.parent().unwrap())))
+            }
+            "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+            _ => None,
+        }));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| !state.requested(METHOD).is_empty()).await;
+        h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap();
+        registered.store(true, Ordering::SeqCst);
+        hold_next.store(true, Ordering::SeqCst);
+        std::fs::write(&dependency, "<?php /* after */").unwrap();
+        h.mgr.php_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+        eventually(|| gate.entered()).await;
+        let updated = r#"{"Greeting 😀":"Latest private buffer"}"#;
+        match action {
+            "foreground" => {
+                let hover = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    h.mgr.hover(caller, Pos::new(0, 10), Default::default()),
+                )
+                .await
+                .expect("foreground supersedes held watcher discovery")
+                .unwrap()
+                .unwrap();
+                assert_eq!(hover.contents.value, TEXT);
+            }
+            "edit" => h.mgr.did_change(
+                catalog,
+                2,
+                &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: updated.into() }],
+                &|| updated.into(),
+            ),
+            "close" => h.mgr.did_close(catalog),
+            "disable" => h.mgr.set_execution_allowed(false),
+            "restart" => {
+                h.mgr.restart(h.mgr.servers().iter().find(|s| s.name == "phpantom").unwrap().id).await.unwrap()
+            }
+            _ => unreachable!(),
+        }
+        gate.open();
+        if action == "edit" || action == "restart" {
+            eventually(|| {
+                state.docs.lock().get(&uri_of(&path)).map(String::as_str)
+                    == Some(if action == "edit" { updated } else { TEXT })
+            })
+            .await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if action == "close" || action == "disable" {
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{action}");
+        }
+        assert_eq!(state.requested("textDocument/hover").len(), if action == "foreground" { 2 } else { 1 });
+        assert_eq!(state.launches.load(Ordering::SeqCst), if action == "restart" { 2 } else { 1 });
+        let opens = state
+            .notified("textDocument/didOpen")
+            .iter()
+            .filter(|event| event["textDocument"]["uri"] == uri_of(&path))
+            .count();
+        assert_eq!(
+            opens,
+            if action == "close" || action == "disable" { 0 } else { 1 },
+            "{action}: no stale or duplicate opens"
+        );
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_external_changes_recover_cancelled_negative_discovery_without_php_navigation() {
+    for action in ["created provider", "modified provider", "removed override", "modified composer", "reviewed edit"] {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchRenameChecked"] = json!(true);
+        let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+        let manifest = h.root.join("composer.json");
+        std::fs::write(&manifest, MANIFEST).unwrap();
+        let dependency = if action == "modified composer" { manifest } else { h.root.join("Provider.php") };
+        if action != "created provider" && action != "modified composer" {
+            std::fs::write(&dependency, "<?php /* before */").unwrap();
+        }
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let expected = dependency.clone();
+        let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let active = registered.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |state, method, params| {
+            (method == METHOD).then(|| {
+                let registered = active.load(Ordering::SeqCst);
+                if registered {
+                    assert!(
+                        state.notified("workspace/didChangeWatchedFiles").iter().any(|event| {
+                            event["changes"].as_array().unwrap().iter().any(|change| change["uri"] == uri_of(&expected))
+                        }),
+                        "discovery must follow the dependency notification"
+                    );
+                }
+                echo(params, registered.then(|| resource.parent().unwrap()))
+            })
+        }));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| !state.requested(METHOD).is_empty()).await;
+        h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap();
+        assert!(!state.docs.lock().contains_key(&uri_of(&path)));
+        registered.store(true, Ordering::SeqCst);
+        match action {
+            "created provider" => {
+                std::fs::write(&dependency, "<?php /* new registration */").unwrap();
+                h.mgr.php_files_changed(std::slice::from_ref(&dependency), &[], &[]);
+            }
+            "removed override" => {
+                std::fs::remove_file(&dependency).unwrap();
+                h.mgr.php_files_changed(&[], &[], std::slice::from_ref(&dependency));
+            }
+            "modified composer" => {
+                let updated = r#"{"require":{"laravel/framework":"13.37.0"},"extra":{"openstormTest":true}}"#;
+                serde_json::from_str::<Value>(updated).unwrap();
+                std::fs::write(&dependency, updated).unwrap();
+                h.mgr.php_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+            }
+            "reviewed edit" => {
+                std::fs::write(&dependency, "<?php /* reviewed registration */").unwrap();
+                h.mgr.php_reviewed_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+            }
+            _ => {
+                std::fs::write(&dependency, "<?php /* changed registration */").unwrap();
+                h.mgr.php_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+            }
+        }
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        if action == "reviewed edit" {
+            let metadata = state.requested(METHOD).len();
+            let notifications = state.notified("workspace/didChangeWatchedFiles").len();
+            h.mgr.php_files_changed(&[], std::slice::from_ref(&dependency), &[]);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(state.requested(METHOD).len(), metadata, "coalesced echoes do not rediscover");
+            assert_eq!(state.notified("workspace/didChangeWatchedFiles").len(), notifications);
+        }
+        assert_eq!(state.requested("textDocument/hover").len(), 1, "{action}: no new PHP request");
+        assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn registered_json_find_usages_admits_current_overlay_without_a_php_editor() {
     let h = harness_languages(
         &[("php", "php", &[("phpantom", caps())]), ("json", "json", &[("json-lsp", incremental_caps())])],

@@ -220,6 +220,7 @@ impl LspManager {
         }
         #[cfg(unix)]
         drop(receipts);
+        self.discover_json_catalogs_for_running_servers();
     }
 
     fn php_sources(&self, snap: &DocSnap, t: &Target) -> IdeResult<Vec<ExpectedSource>> {

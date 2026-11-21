@@ -441,10 +441,56 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             closes_before_navigation,
             "unchanged PHP requests retain the refreshed overlay"
         );
+        let bootstrap = root.join("bootstrap/providers.php");
+        let original_bootstrap = files.iter().find(|(name, _)| *name == "bootstrap/providers.php").unwrap().1;
+        let watched = || {
+            std::fs::read_to_string(control.join("events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|event| {
+                    event["method"] == "workspace/didChangeWatchedFiles"
+                        && event["uri"] == ide_lsp::path_to_uri_string(&bootstrap)
+                })
+                .count()
+        };
+        for (registered, text) in [(false, "<?php return [];"), (true, original_bootstrap)] {
+            let before = count("textDocument/didOpen");
+            let watch_before = watched();
+            std::fs::write(&bootstrap, text).unwrap();
+            let lint = std::process::Command::new(&php).args(["-n", "-l"]).arg(&bootstrap).output().unwrap();
+            assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stderr));
+            mgr.php_files_changed(&[], std::slice::from_ref(&bootstrap), &[]);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while watched() <= watch_before
+                    || if registered {
+                        count("textDocument/didOpen") <= before
+                    } else {
+                        count("textDocument/didClose") != count("textDocument/didOpen")
+                    }
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("closed provider-list changes reconcile private catalogs before PHP navigation");
+            let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap();
+            if registered {
+                assert!(hover.unwrap().contents.value.contains("Private overlay"));
+            } else if let Some(hover) = hover {
+                assert!(!hover.contents.value.contains("Private overlay"), "an unregistered catalog stays private");
+            }
+            assert_eq!(
+                mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid,
+                pid_before_reconfiguration
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&bootstrap).unwrap(), original_bootstrap);
+        let opens_before_edit = count("textDocument/didOpen");
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;
         replace(&mgr, json, 2, OVERLAY, updated);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while count("textDocument/didOpen") != opens_before_navigation + 1 {
+            while count("textDocument/didOpen") != opens_before_edit + 1 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })

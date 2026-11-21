@@ -609,7 +609,7 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         .await
         .expect("current unsaved catalog must be admitted before the first PHP command");
         let opens_before_attach = opens();
-        f.project.documents.open(&f.root.join("app/SecondCaller.php")).unwrap();
+        let second = f.project.documents.open(&f.root.join("app/SecondCaller.php")).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !frames()
                 .iter()
@@ -622,6 +622,43 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         })
         .await
         .expect("managed PHP attachment must re-admit the private catalog before another PHP command");
+        let second_saved = "<?php namespace App; class SecondCaller { /* saved */ }";
+        for action in ["edit", "save", "close"] {
+            let before = opens();
+            match action {
+                "edit" => {
+                    f.project.documents.replace_all(second.id, second_saved).unwrap();
+                }
+                "save" => {
+                    f.project.documents.save(second.id).unwrap();
+                    let source = f.root.join("app/SecondCaller.php");
+                    assert_eq!(std::fs::read_to_string(&source).unwrap(), second_saved);
+                    let lint =
+                        std::process::Command::new(std::env::var_os("OPENSTORM_TEST_PHP_BIN").expect("owned PHP"))
+                            .args(["-n", "-l"])
+                            .arg(source)
+                            .output()
+                            .unwrap();
+                    assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stderr));
+                }
+                "close" => {
+                    f.project.documents.close(second.id);
+                }
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !frames()
+                    .iter()
+                    .filter(|event| event["method"] == "textDocument/didOpen")
+                    .skip(before)
+                    .any(|event| event["version"] == private_version)
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("managed PHP {action} must re-admit the private catalog before navigation"));
+        }
         let opens_before_navigation = opens();
         for _ in 0..2 {
             let hover = ide_host::ops::lsp::lsp_hover(
@@ -802,7 +839,11 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         assert_eq!(refs.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
         assert_eq!(refs.locations[0].range, key_range(caller, "Greeting 😀"));
         for (name, text) in &extra {
-            let expected = if name == "packages/billing/json/en.json" { updated } else { text };
+            let expected = match name.as_str() {
+                "packages/billing/json/en.json" => updated,
+                "app/SecondCaller.php" => second_saved,
+                _ => text,
+            };
             assert_eq!(std::fs::read_to_string(f.root.join(name)).unwrap(), expected);
         }
         assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), caller);

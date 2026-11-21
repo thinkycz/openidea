@@ -1433,13 +1433,7 @@ impl LspManager {
                 self.runtime.spawn(async move { hint.check_vue_navigation(&server).await });
             }
         }
-        if language.as_str() == "php" {
-            for server in &servers {
-                if let Some(run) = server.running() {
-                    self.discover_json_catalogs_for_server(server, run.generation);
-                }
-            }
-        }
+        self.discover_json_catalogs_for_php_document(doc);
         self.discover_json_document(doc);
     }
 
@@ -1518,6 +1512,7 @@ impl LspManager {
             false
         };
         drop(docs);
+        self.discover_json_catalogs_for_php_document(doc);
         if compose_changed && let Some(me) = self.me.upgrade() {
             me.reconfigure_soon();
         }
@@ -1578,6 +1573,7 @@ impl LspManager {
             }
         }
         drop(docs);
+        self.discover_json_catalogs_for_php_document(doc);
         self.schedule_pull(doc, None, Duration::ZERO);
         self.pull_dependents(doc);
         self.go_mod_saved(doc);
@@ -1611,6 +1607,9 @@ impl LspManager {
                 && let Err(e) = run.peer.notify("textDocument/didClose", json!({ "textDocument": { "uri": d.uri } }))
             {
                 tracing::debug!("{}: didClose: {e}", a.server.name);
+            }
+            if d.language.as_str() == "php" && a.resource.is_none() {
+                self.discover_json_catalogs_for_server(&a.server, run.generation);
             }
         }
     }

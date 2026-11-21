@@ -1561,3 +1561,192 @@ async fn registered_json_php_attachment_keeps_optional_servers_and_capability_bo
         h.mgr.shutdown_all().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_php_edits_saves_and_closes_reconcile_finished_sessions() {
+    for event in ["edit", "save", "close", "close last PHP"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let state = h.launcher.state("phpantom");
+        state
+            .responder
+            .lock()
+            .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        let provider_text = "<?php /* provider */";
+        let provider = if event == "close last PHP" { caller } else { h.open("Provider.php", provider_text).0 };
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let server = h.mgr.servers()[0].id;
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        let opens = || {
+            state
+                .notified("textDocument/didOpen")
+                .iter()
+                .filter(|params| params["textDocument"]["uri"] == uri_of(&path))
+                .count()
+        };
+        match event {
+            "edit" => {
+                let updated = "<?php /* updated provider */";
+                h.mgr.did_change(
+                    provider,
+                    2,
+                    &[AppliedChange {
+                        range: rng(0, 0, 0, provider_text.encode_utf16().count() as u32),
+                        text: updated.into(),
+                    }],
+                    &|| updated.into(),
+                );
+            }
+            "save" => h.mgr.did_save(provider, provider_text),
+            "close" | "close last PHP" => h.mgr.did_close(provider),
+            _ => unreachable!(),
+        }
+        eventually(|| {
+            state.notified("textDocument/didClose").iter().any(|params| params["textDocument"]["uri"] == uri_of(&path))
+        })
+        .await;
+        if event == "close last PHP" {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert_eq!(opens(), 1);
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)));
+        } else {
+            eventually(|| opens() == 2).await;
+            assert_eq!(state.docs.lock().get(&uri_of(&path)).map(String::as_str), Some(TEXT));
+        }
+        assert!(state.requested("textDocument/hover").is_empty());
+        assert_eq!(h.mgr.servers()[0].id, server);
+        assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_php_provider_edits_switch_and_restore_open_catalogs_without_navigation() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let original = h.root.join("catalogs/en.json");
+    let alternate = h.root.join("alternate/en.json");
+    let first = original.clone();
+    let second = alternate.clone();
+    let provider_uri = uri_of(&h.root.join("Provider.php"));
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |state, method, params| {
+        if method != METHOD {
+            return None;
+        }
+        let alternate = state.docs.lock().get(&provider_uri).is_some_and(|text| text.contains("alternate"));
+        let selected = if alternate { &second } else { &first };
+        Some(echo(params, (params["resourceUri"] == uri_of(selected)).then(|| selected.parent().unwrap())))
+    }));
+    h.open("Caller.php", "<?php __('Greeting 😀');");
+    let initial = "<?php /* original provider */";
+    let changed = "<?php /* alternate provider */";
+    let (provider, _) = h.open("Provider.php", initial);
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    h.mgr.did_open(DocId::next(), &original, &LanguageId::new("json"), 1, TEXT);
+    h.mgr.did_open(DocId::next(), &alternate, &LanguageId::new("json"), 1, TEXT);
+    eventually(|| state.docs.lock().get(&uri_of(&original)).map(String::as_str) == Some(TEXT)).await;
+    eventually(|| state.requested(METHOD).iter().any(|params| params["resourceUri"] == uri_of(&alternate))).await;
+    let edit = |version, before: &str, after: &str| {
+        h.mgr.did_change(
+            provider,
+            version,
+            &[AppliedChange { range: rng(0, 0, 0, before.encode_utf16().count() as u32), text: after.into() }],
+            &|| after.into(),
+        )
+    };
+    edit(2, initial, changed);
+    eventually(|| state.docs.lock().get(&uri_of(&alternate)).map(String::as_str) == Some(TEXT)).await;
+    assert!(!state.docs.lock().contains_key(&uri_of(&original)));
+    edit(3, changed, initial);
+    eventually(|| state.docs.lock().get(&uri_of(&original)).map(String::as_str) == Some(TEXT)).await;
+    assert!(!state.docs.lock().contains_key(&uri_of(&alternate)));
+    assert!(state.requested("textDocument/hover").is_empty());
+    assert!(!original.exists() && !alternate.exists());
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_php_lifecycle_reconciliation_cancels_stale_admission_and_keeps_foreground_priority() {
+    for action in ["edit again", "foreground", "close", "disable"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let provider_uri = uri_of(&h.root.join("Provider.php"));
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+            METHOD => {
+                let registered = state.docs.lock().get(&provider_uri).is_some_and(|text| !text.contains("unregistered"));
+                if state.requested(METHOD).len() == 2 { held.hold(); }
+                Some(echo(params, registered.then(|| resource.parent().unwrap())))
+            }
+            "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+            _ => None,
+        }));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        let initial = "<?php /* registered */";
+        let updated = "<?php /* registered v2 */";
+        let rejected = "<?php /* unregistered */";
+        let (provider, _) = h.open("Provider.php", initial);
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        let edit = |version, before: &str, after: &str| {
+            h.mgr.did_change(
+                provider,
+                version,
+                &[AppliedChange { range: rng(0, 0, 0, before.encode_utf16().count() as u32), text: after.into() }],
+                &|| after.into(),
+            )
+        };
+        edit(2, initial, updated);
+        eventually(|| gate.entered()).await;
+        assert!(!state.docs.lock().contains_key(&uri_of(&path)));
+        match action {
+            "edit again" => {
+                edit(3, updated, rejected);
+                eventually(|| state.requested(METHOD).len() >= 3).await;
+            }
+            "foreground" => {
+                let hover = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    h.mgr.hover(caller, Pos::new(0, 10), Default::default()),
+                )
+                .await
+                .expect("foreground action supersedes held lifecycle reconciliation")
+                .unwrap()
+                .unwrap();
+                assert_eq!(hover.contents.value, TEXT);
+            }
+            "close" => h.mgr.did_close(catalog),
+            "disable" => h.mgr.set_execution_allowed(false),
+            _ => unreachable!(),
+        }
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if action != "foreground" {
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{action}");
+        }
+        if action == "edit again" {
+            edit(4, rejected, initial);
+            eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        }
+        let opens = state
+            .notified("textDocument/didOpen")
+            .iter()
+            .filter(|params| params["textDocument"]["uri"] == uri_of(&path))
+            .count();
+        assert_eq!(opens, if action == "foreground" || action == "edit again" { 2 } else { 1 }, "{action}");
+        assert_eq!(state.requested("textDocument/hover").len(), usize::from(action == "foreground"));
+        h.mgr.shutdown_all().await;
+    }
+}

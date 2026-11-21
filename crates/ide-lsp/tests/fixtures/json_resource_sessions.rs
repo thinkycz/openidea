@@ -313,6 +313,28 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         })
         .await
         .expect("another PHP buffer must re-admit the catalog before the first PHP request");
+        replace(
+            &mgr,
+            second,
+            2,
+            "<?php namespace App; class SecondCaller {}",
+            "<?php namespace App; class SecondCaller { /* changed */ }",
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") != 3 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("PHP edit must re-admit the catalog before navigation");
+        mgr.did_close(second);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") != 4 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("PHP close must re-admit the catalog for remaining consumers before navigation");
         for _ in 0..2 {
             let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
             assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
@@ -321,12 +343,12 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             assert_eq!(targets[0].path.to_path_buf(), catalog);
             assert_eq!(targets[0].range.start, pos(OVERLAY, "Greeting 😀"));
         }
-        assert_eq!(count("textDocument/didOpen"), 2, "unchanged PHP requests reuse the refreshed overlay");
-        assert_eq!(count("textDocument/didClose"), 1, "only the PHP attachment retires the first session");
+        assert_eq!(count("textDocument/didOpen"), 4, "unchanged PHP requests reuse the refreshed overlay");
+        assert_eq!(count("textDocument/didClose"), 3, "PHP lifecycle changes retire their prior sessions");
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;
         replace(&mgr, json, 2, OVERLAY, updated);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while count("textDocument/didOpen") != 3 {
+            while count("textDocument/didOpen") != 5 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -376,7 +398,15 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         mgr.did_close(alternate_doc);
         let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
         assert!(hover.contents.value.contains("Alternate welcome"));
+        let opens_before_provider_close = count("textDocument/didOpen");
         mgr.did_close(provider);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") <= opens_before_provider_close {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("closing an unsaved provider must restore its disk registration before PHP navigation");
         let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
         assert!(hover.contents.value.contains("Updated private value"));
         let refs = mgr.references(json, pos(updated, "Greeting 😀"), false, true, Default::default()).await.unwrap();

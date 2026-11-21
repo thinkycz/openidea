@@ -322,3 +322,155 @@ impl LspManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_jsonrpc::{NoopHandler, Peer, framing};
+    use ide_text::AppliedChange;
+    use parking_lot::RwLock;
+
+    const MANIFEST: &str = r#"{"require":{"laravel/framework":"13.37.0"}}"#;
+    const PRIVATE: &str = r#"{"Greeting 😀":"Private catalog"}"#;
+
+    fn replace(manager: &LspManager, doc: DocId, version: u32, before: &str, after: &str) {
+        manager.did_change(
+            doc,
+            version,
+            &[AppliedChange {
+                range: ide_core::Range::new(
+                    ide_core::Pos::new(0, 0),
+                    ide_core::Pos::new(0, before.encode_utf16().count() as u32),
+                ),
+                text: after.into(),
+            }],
+            &|| after.into(),
+        );
+    }
+
+    #[tokio::test]
+    async fn json_publication_rejects_other_composer_changes_after_async_validation() {
+        for action in ["edit", "restore", "close", "open", "unchanged"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let project = root.join("composer.json");
+            let other = root.join("consumers/other/composer.json");
+            std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+            std::fs::write(&project, MANIFEST).unwrap();
+            std::fs::write(&other, MANIFEST).unwrap();
+            let manager =
+                LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![])), Arc::new(|_| {}));
+            let _changes = manager.json_preparation_changed.subscribe();
+            let catalog = DocId::next();
+            let resource = root.join("catalogs/en.json");
+            manager.did_open(catalog, &resource, &LanguageId::new("json"), 1, PRIVATE);
+            let composer = DocId::next();
+            if action != "open" {
+                manager.did_open(composer, &other, &LanguageId::new("json"), 1, MANIFEST);
+            }
+            let registry = LanguageRegistry::load(None).unwrap();
+            let php = LanguageId::new("php");
+            let config =
+                registry.get(&php).unwrap().language_servers.iter().find(|s| s.name == "phpantom").cloned().unwrap();
+            let server = Arc::new(Server::new(config, root.clone(), php.clone()));
+            let generation = server.begin_start().unwrap();
+            let (client, wire) = tokio::io::duplex(65_536);
+            let (read, write) = tokio::io::split(client);
+            let run = Running {
+                generation,
+                peer: Peer::connect(read, write, Arc::new(NoopHandler)),
+                caps: Arc::new(RwLock::new(ServerCaps::parse(json!({"experimental":{
+                    "phpWorkbenchJsonTranslationResource":true,
+                    "phpWorkbenchRegisteredJsonTranslations":true
+                }})))),
+                watchers: Arc::new(RwLock::new(Default::default())),
+                diagnostic_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            };
+            assert!(server.mark_ready(generation, run.clone()));
+            let caller = DocId::next();
+            let second = DocId::next();
+            for (doc, path) in [(caller, root.join("Caller.php")), (second, other.parent().unwrap().join("Caller.php"))]
+            {
+                manager.did_open(doc, &path, &php, 1, "<?php __('Greeting 😀');");
+                manager.docs.lock().get_mut(&doc).unwrap().servers.push(Attached {
+                    server: server.clone(),
+                    opened_gen: Some(generation),
+                    resource: None,
+                });
+            }
+            let target = Target { server, run };
+            let cancel = CancellationToken::new();
+            let source = manager.snapshot(caller).unwrap();
+            let (selected_inputs, _) = manager.composer_resource_inputs(&project, &resource, &cancel).await.unwrap();
+            let (negative_inputs, _) = manager.composer_resource_inputs(&other, &resource, &cancel).await.unwrap();
+            let mut selected = PhpJsonTranslationResource {
+                project: project.clone(),
+                resource: resource.clone(),
+                root: Some(resource.parent().unwrap().to_owned()),
+                target: target.clone(),
+                sources: manager.navigation_sources(&source, &target).unwrap(),
+                composer: Some(Arc::new(selected_inputs)),
+            };
+            let negative = PhpJsonTranslationResource {
+                project: other.clone(),
+                resource: resource.clone(),
+                root: None,
+                target: target.clone(),
+                sources: manager.navigation_sources(&source, &target).unwrap(),
+                composer: Some(Arc::new(negative_inputs)),
+            };
+            let revision = *manager.json_preparation_changed.borrow();
+            manager.php_json_translation_resource_current(&selected, cancel.clone()).await.unwrap();
+            manager.php_json_translation_resource_current(&negative, cancel.clone()).await.unwrap();
+            let catalog = manager.snapshot(catalog).unwrap();
+            match action {
+                "edit" => replace(&manager, composer, 2, MANIFEST, "{}"),
+                "restore" => {
+                    replace(&manager, composer, 2, MANIFEST, "{}");
+                    replace(&manager, composer, 3, "{}", MANIFEST);
+                }
+                "close" => manager.did_close(composer),
+                "open" => manager.did_open(composer, &other, &LanguageId::new("json"), 1, MANIFEST),
+                "unchanged" => {}
+                _ => unreachable!(),
+            }
+            // The selected receipt stays valid; the earlier negative receipt does not.
+            manager.php_json_translation_resource_current(&selected, cancel.clone()).await.unwrap();
+            assert_eq!(
+                manager.php_json_translation_resource_current(&negative, cancel).await.is_ok(),
+                action == "unchanged"
+            );
+            let result = manager.publish_refreshed_json_catalog(&catalog, &mut selected, revision);
+            let mut wire = tokio::io::BufReader::new(wire);
+            if action == "unchanged" {
+                result.unwrap();
+                let notification = tokio::time::timeout(Duration::from_secs(1), framing::read_message(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let notification: Value = serde_json::from_slice(&notification).unwrap();
+                assert_eq!(notification["method"], "textDocument/didOpen");
+                assert_eq!(notification["params"]["textDocument"]["text"], PRIVATE);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{action}: retired negative Composer proof must not forward private catalog text"
+                );
+                assert_eq!(manager.json_resource_count.load(Ordering::Acquire), 0);
+                target.run.peer.notify("test/publicationBarrier", json!({})).unwrap();
+                let barrier = tokio::time::timeout(Duration::from_secs(1), framing::read_message(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let barrier: Value = serde_json::from_slice(&barrier).unwrap();
+                assert_eq!(barrier["method"], "test/publicationBarrier", "no private open may precede the barrier");
+            }
+            assert!(!resource.exists());
+            target.run.peer.close_write();
+            drop(wire);
+            manager.shutdown_all().await;
+        }
+    }
+}

@@ -236,7 +236,7 @@ impl LspManager {
                     return Err(IdeError::cancelled());
                 }
                 let witness = if receipt.root.is_some() {
-                    let session = self.open_json_session(&catalog.snap, &mut receipt)?;
+                    let session = self.open_json_session(&catalog.snap, &mut receipt, None)?;
                     let witness = session.witness.clone();
                     opened.push(session);
                     Some(witness)

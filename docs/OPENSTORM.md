@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Composer publication fence slice 221 (2026-11-21; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: background JSON catalog discovery now captures its complete
+managed-input revision before asynchronous validation. Publication checks that
+revision under the document lock before sending private catalog text. A change
+to an earlier negative consuming-context decision therefore rejects publication
+even when the selected project's receipt remains current. Existing discovery
+cancellation and wakeups can retry with fresh inputs.
+
+The revision comes from the existing preparation watch channel, whose receiver
+remains live throughout background discovery. PHP, Composer and catalog buffer
+changes update it under the document lock. The final check shares that lock with
+managed buffer changes and the private didOpen. This closes the gap after the
+last asynchronous receipt validation. Explicit-context foreground preparation
+and Find Usages keep their existing receipt checks; no public command, protocol,
+setting, engine capability or new UI is introduced.
+
+A deterministic unit regression uses synthetic positive/negative decisions,
+validated by the actual client Composer/source validators, at the real publication
+boundary. Editing the other manifest retires the negative receipt while leaving
+the selected receipt valid; the old publisher incorrectly accepts it. The fix
+passes edit, restore to original text, close and clean-open cases. A FIFO marker
+on the actual framed transport proves that no private open preceded it. The
+unchanged case still forwards the exact private catalog text. The test does not
+start an engine and does not claim real-engine concurrent negative decisions;
+all 81 public JSON regressions and 134 real-engine cases also pass.
+
+Fresh workspace executables reject query-only engine 187 and pass all 72 client
+and 62 Host cases on signed inactive engine 188. Both focused real-client/Host
+Composer recovery cases pass with the current source. Source, Cargo fingerprint
+and binary witnesses match; retained fixture originals remain unchanged. Gates
+pass: Rust 5,613 / 260 ignored / the same 11 documented exclusions; workspace
+all-target Clippy with warnings denied; Rust formatting; bindings fidelity;
+default-engine provenance; frontend 14,603 / eight skipped; types/lint/format/Knip;
+production build/Safari compatibility; 59 controlled-browser cases. Temporary
+test executables strip symbols for the disk budget. Debug linking reports
+13 instances of the existing large-unwind-table warning class. The unchanged
+recorder retains slice 215's deterministic overlapping-ID evidence with its hash
+rechecked. Native GUI remains user-skipped; no engine or app is promoted, and
+source acceptance does not establish packaged-app behavior.
+
+The latest 134-case regression set replaces the previous
+875,697,504-byte payload. Cargo cleanup: Removed 19677 files, 21.8GiB total.
+Removed frontend dist (73,745,139 bytes). All six retained
+executables list their expected tests after cleanup. The sole signed App 119,
+default engine 185, engine provenance, historical receipts and both stashes remain
+preserved. Normal commit, push and remote read-back are tracked in the ignored
+acceptance receipt. All 69 areas remain at 67 partial/two user-deferred.
+
+Next: equivalent final-publication coverage for explicit foreground preparation
+and Find Usages, broader external dependency changes, wider nested or closed
+consumers, separate-server overlays and multiple-positive support before promotion.
+Discovery still uses active open PHP consumers. Wider external-file and cross-server
+publication stress, large-catalog performance, physical/service matrices and
+native UI remain unverified. Evidence: artifacts/checks/slice221/
+{gates,frontend-gates,evaluation,focused-real-client,focused-real-host,
+frozen-runtimes,retention,retained-runtime-lists}.json,
+red.log, green-lib.log and green-mock.log.
+
 Composer buffer reconciliation slice 220 (2026-11-21; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: opening, editing, saving or discarding a managed Composer
 manifest now reconciles existing custom JSON catalogs against running PHP

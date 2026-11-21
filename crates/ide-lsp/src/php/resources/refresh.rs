@@ -254,7 +254,7 @@ impl LspManager {
         server: &Arc<Server>,
         cancel: &CancellationToken,
     ) -> IdeResult<bool> {
-        let preparation_revision = *self.json_preparation_changed.borrow();
+        let inputs = self.json_input_snapshot();
         let _selection = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(IdeError::cancelled()),
@@ -367,7 +367,7 @@ impl LspManager {
         if cancel.is_cancelled() {
             return Err(IdeError::cancelled());
         }
-        self.publish_refreshed_json_catalog(&catalog, &mut receipt, preparation_revision)?;
+        self.publish_refreshed_json_catalog(&catalog, &mut receipt, &inputs)?;
         Ok(true)
     }
 
@@ -375,8 +375,8 @@ impl LspManager {
         &self,
         catalog: &DocSnap,
         receipt: &mut PhpJsonTranslationResource,
-        preparation_revision: u64,
+        inputs: &JsonInputSnapshot,
     ) -> IdeResult<()> {
-        self.open_json_session(catalog, receipt, Some(preparation_revision))?.retain()
+        self.open_json_session(catalog, receipt, inputs)?.retain()
     }
 }

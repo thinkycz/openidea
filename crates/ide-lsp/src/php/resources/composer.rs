@@ -350,6 +350,15 @@ mod tests {
 
     #[tokio::test]
     async fn json_publication_rejects_other_composer_changes_after_async_validation() {
+        publication_after_validation(true).await;
+    }
+
+    #[tokio::test]
+    async fn json_foreground_publication_rejects_composer_changes_after_async_validation() {
+        publication_after_validation(false).await;
+    }
+
+    async fn publication_after_validation(background: bool) {
         for action in ["edit", "restore", "close", "open", "unchanged"] {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().canonicalize().unwrap();
@@ -360,13 +369,13 @@ mod tests {
             std::fs::write(&other, MANIFEST).unwrap();
             let manager =
                 LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![])), Arc::new(|_| {}));
-            let _changes = manager.json_preparation_changed.subscribe();
             let catalog = DocId::next();
             let resource = root.join("catalogs/en.json");
             manager.did_open(catalog, &resource, &LanguageId::new("json"), 1, PRIVATE);
             let composer = DocId::next();
+            let edited_manifest = if background { &other } else { &project };
             if action != "open" {
-                manager.did_open(composer, &other, &LanguageId::new("json"), 1, MANIFEST);
+                manager.did_open(composer, edited_manifest, &LanguageId::new("json"), 1, MANIFEST);
             }
             let registry = LanguageRegistry::load(None).unwrap();
             let php = LanguageId::new("php");
@@ -419,7 +428,7 @@ mod tests {
                 sources: manager.navigation_sources(&source, &target).unwrap(),
                 composer: Some(Arc::new(negative_inputs)),
             };
-            let revision = *manager.json_preparation_changed.borrow();
+            let inputs = manager.json_input_snapshot();
             manager.php_json_translation_resource_current(&selected, cancel.clone()).await.unwrap();
             manager.php_json_translation_resource_current(&negative, cancel.clone()).await.unwrap();
             let catalog = manager.snapshot(catalog).unwrap();
@@ -430,17 +439,23 @@ mod tests {
                     replace(&manager, composer, 3, "{}", MANIFEST);
                 }
                 "close" => manager.did_close(composer),
-                "open" => manager.did_open(composer, &other, &LanguageId::new("json"), 1, MANIFEST),
+                "open" => manager.did_open(composer, edited_manifest, &LanguageId::new("json"), 1, MANIFEST),
                 "unchanged" => {}
                 _ => unreachable!(),
             }
-            // The selected receipt stays valid; the earlier negative receipt does not.
-            manager.php_json_translation_resource_current(&selected, cancel.clone()).await.unwrap();
+            assert_eq!(
+                manager.php_json_translation_resource_current(&selected, cancel.clone()).await.is_ok(),
+                background || action == "unchanged"
+            );
             assert_eq!(
                 manager.php_json_translation_resource_current(&negative, cancel).await.is_ok(),
-                action == "unchanged"
+                !background || action == "unchanged"
             );
-            let result = manager.publish_refreshed_json_catalog(&catalog, &mut selected, revision);
+            let result = if background {
+                manager.publish_refreshed_json_catalog(&catalog, &mut selected, &inputs)
+            } else {
+                manager.open_json_session(&catalog, &mut selected, &inputs).and_then(|session| session.retain())
+            };
             let mut wire = tokio::io::BufReader::new(wire);
             if action == "unchanged" {
                 result.unwrap();
@@ -453,10 +468,7 @@ mod tests {
                 assert_eq!(notification["method"], "textDocument/didOpen");
                 assert_eq!(notification["params"]["textDocument"]["text"], PRIVATE);
             } else {
-                assert!(
-                    result.is_err(),
-                    "{action}: retired negative Composer proof must not forward private catalog text"
-                );
+                assert!(result.is_err(), "{action}: retired Composer proof must not forward private catalog text");
                 assert_eq!(manager.json_resource_count.load(Ordering::Acquire), 0);
                 target.run.peer.notify("test/publicationBarrier", json!({})).unwrap();
                 let barrier = tokio::time::timeout(Duration::from_secs(1), framing::read_message(&mut wire))

@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Mandatory catalog input snapshots slice 222 (2026-11-21; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: every private JSON catalog publication now requires a typed
+managed-input snapshot. The snapshot owns a live preparation-watch receiver and
+a frozen revision, so changes remain observable throughout the operation even
+without a background discovery task. The shared publisher checks the revision
+under the document lock before sending private didOpen; callers can no longer
+opt out with None.
+
+Foreground PHP preparation captures the snapshot before asynchronous catalog
+and Composer validation. Background discovery uses the same type and preserves
+its earlier all-context check. Explicit Find Usages captures each positive
+context after server setup and before its final asynchronous receipt validation.
+That placement preserves JSON-only startup while closing the remaining gap
+between final validation and private publication. Existing source/Composer
+receipts, selection locking, capability checks, cancellation, undo and recovery
+behavior remain; no public command, protocol, setting or UI is introduced.
+
+The new deterministic foreground unit case fails on the previous code: changing
+the selected Composer buffer retires its validated receipt, but the old optional
+guard still permits publication. The shared test fixture covers selected-context
+and other-context edits, restore to original text, close and clean open. Both
+unit cases pass with FIFO transport markers proving no private open in rejected
+cases and exact private text in unchanged cases. These are synthetic decisions
+validated through the actual client validators at the real publication boundary;
+they do not establish real-engine concurrent receipt changes. All 81 public JSON
+regressions pass, including explicit Find Usages before a PHP editor exists.
+
+Fresh workspace executables reject query-only engine 187 and pass all 72 client
+and 62 Host cases on signed inactive engine 188. Both focused real-client/Host
+Composer recovery cases pass on current source. Source, Cargo fingerprint and
+binary witnesses match; retained fixture originals remain unchanged. Gates pass:
+Rust 5,614 / 260 ignored / the same 11 documented exclusions; workspace all-target
+Clippy with warnings denied; Rust formatting; bindings fidelity; default-engine
+provenance; frontend 14,603 / eight skipped; types/lint/format/Knip; production
+build/Safari compatibility; 59 controlled-browser cases. Temporary test executables
+strip symbols for the disk budget. Debug linking reports 13 instances of the
+existing large-unwind-table warning class. The unchanged recorder retains slice
+215's deterministic overlapping-ID evidence with its hash rechecked. Native GUI
+remains user-skipped; no engine or app is promoted, and source acceptance does
+not establish packaged-app behavior.
+
+The latest 134-case regression set replaces the previous
+875,701,664-byte payload. Cargo cleanup: Removed 19677 files, 21.8GiB total.
+Removed frontend dist (73,745,139 bytes). All six retained
+executables list their expected tests after cleanup. The sole signed App 119,
+default engine 185, engine provenance, historical receipts and both stashes remain
+preserved. Normal commit, push and remote read-back are tracked in the ignored
+acceptance receipt. All 69 areas remain at 67 partial/two user-deferred.
+
+Next: broader external dependency changes, wider nested or closed consumers,
+separate-server overlays and multiple-positive support before promotion/packaging.
+Discovery still uses active open PHP consumers. Wider external-file and cross-server
+publication stress, large-catalog performance, physical/service matrices and
+native UI remain unverified. Evidence: artifacts/checks/slice222/
+{gates,frontend-gates,evaluation,focused-real-client,focused-real-host,
+frozen-runtimes,retention,retained-runtime-lists}.json,
+red.log, green-lib.log and green-mock.log.
+
 Composer publication fence slice 221 (2026-11-21; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: background JSON catalog discovery now captures its complete
 managed-input revision before asynchronous validation. Publication checks that

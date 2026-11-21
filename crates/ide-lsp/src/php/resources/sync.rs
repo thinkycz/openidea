@@ -150,6 +150,7 @@ impl LspManager {
         targets: &[Target],
         cancel: &CancellationToken,
     ) -> IdeResult<Option<Preparation>> {
+        let inputs = self.json_input_snapshot();
         if source.language.as_str() != "php" || source.uri != uri::path_to_uri(&source.path) {
             return Ok(None);
         }
@@ -236,7 +237,7 @@ impl LspManager {
                     return Err(IdeError::cancelled());
                 }
                 let witness = if receipt.root.is_some() {
-                    let session = self.open_json_session(&catalog.snap, &mut receipt, None)?;
+                    let session = self.open_json_session(&catalog.snap, &mut receipt, &inputs)?;
                     let witness = session.witness.clone();
                     opened.push(session);
                     Some(witness)

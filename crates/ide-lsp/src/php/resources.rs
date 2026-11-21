@@ -23,6 +23,11 @@ pub(crate) struct JsonResourceWitness {
     composer: Option<Arc<ComposerInputs>>,
 }
 
+struct JsonInputSnapshot {
+    revision: u64,
+    _changes: tokio::sync::watch::Receiver<u64>,
+}
+
 impl std::fmt::Debug for PhpJsonTranslationResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhpJsonTranslationResource")
@@ -119,6 +124,12 @@ async fn resource_authority(project: &Path, resource: &Path, cancel: &Cancellati
 }
 
 impl LspManager {
+    fn json_input_snapshot(&self) -> JsonInputSnapshot {
+        let changes = self.json_preparation_changed.subscribe();
+        let revision = *changes.borrow();
+        JsonInputSnapshot { revision, _changes: changes }
+    }
+
     /// Classify a proposed catalog through its consuming open PHP source, never
     /// through the catalog's nearest Composer project. No JSON text is sent.
     pub async fn php_json_translation_resource(

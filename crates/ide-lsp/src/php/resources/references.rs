@@ -177,7 +177,7 @@ impl LspManager {
         &'a self,
         snap: &DocSnap,
         receipt: &mut PhpJsonTranslationResource,
-        preparation_revision: Option<u64>,
+        inputs: &JsonInputSnapshot,
     ) -> IdeResult<ResourceSession<'a>> {
         let target = &receipt.target;
         let mut docs = self.docs.lock();
@@ -199,7 +199,7 @@ impl LspManager {
             || !self.execution_allowed.load(Ordering::Acquire)
             || self.shutting_down.load(Ordering::Acquire)
             || self.json_refresh_publications.load(Ordering::Acquire) != 0
-            || preparation_revision.is_some_and(|revision| *self.json_preparation_changed.borrow() != revision)
+            || *self.json_preparation_changed.borrow() != inputs.revision
             || !supports_resources(&target.caps())
             || target.server.running_gen(target.run.generation).is_none()
         {
@@ -308,12 +308,13 @@ impl LspManager {
                 receipts.push(receipt);
                 continue;
             }
+            let inputs = self.json_input_snapshot();
             self.php_json_translation_resource_current(&receipt, cancel.clone()).await?;
             self.json_buffer_current(snap)?;
             if !receipt.target.caps().has("referencesProvider") {
                 return Err(unsupported(std::slice::from_ref(&receipt.target.server), "find references"));
             }
-            let session = self.open_json_session(snap, &mut receipt, None)?;
+            let session = self.open_json_session(snap, &mut receipt, &inputs)?;
             let locations =
                 self.json_session_references(snap, &receipt, pos, include_declaration, cancel, &session.cancel).await?;
             session.finish(&mut receipt)?;

@@ -120,7 +120,8 @@ impl LspManager {
         servers: &[ide_core::ServerId],
     ) {
         self.retire_json_resources_in(docs, |id, _, resource_path, attached| {
-            id == doc
+            Self::json_composer_input(path, canonical)
+                || id == doc
                 || resource_path == canonical
                 || servers.contains(&attached.server.id)
                 || attached
@@ -134,7 +135,7 @@ impl LspManager {
         if docs.get(&doc).is_some_and(|source| Self::json_catalog_path(&source.path, &source.uri, &source.language)) {
             self.record_json_catalog_change();
         } else if docs.get(&doc).is_some_and(|source| {
-            source.language.as_str() == "php" || source.path.file_name().is_some_and(|name| name == "composer.json")
+            source.language.as_str() == "php" || Self::json_composer_input(&source.path, &source.canonical)
         }) {
             self.invalidate_json_preparation();
         }

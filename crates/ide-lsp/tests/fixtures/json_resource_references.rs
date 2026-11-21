@@ -1907,3 +1907,199 @@ async fn registered_json_discovery_waits_until_every_reconfiguration_pass_finish
     assert_eq!(state.launches.load(Ordering::SeqCst), 1);
     h.mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_composer_buffers_recover_without_another_php_request() {
+    for action in ["discard", "restore", "save", "clean open", "clean save"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        let manifest = h.root.join("composer.json");
+        std::fs::write(&manifest, MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let state = h.launcher.state("phpantom");
+        state
+            .responder
+            .lock()
+            .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap();
+        let composer = DocId::next();
+        let clean = action == "clean open" || action == "clean save";
+        h.mgr.did_open(composer, &manifest, &LanguageId::new("json"), 1, if clean { MANIFEST } else { "{}" });
+        if clean {
+            eventually(|| {
+                state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)
+                    && state.requested(METHOD).len() == 2
+            })
+            .await;
+            if action == "clean save" {
+                h.mgr.did_save(composer, MANIFEST);
+                eventually(|| {
+                    state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)
+                        && state.requested(METHOD).len() == 3
+                })
+                .await;
+            }
+        } else {
+            eventually(|| !state.docs.lock().contains_key(&uri_of(&path))).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(state.requested(METHOD).len(), 1, "dirty manifests cannot authorize a catalog");
+            match action {
+                "discard" => h.mgr.did_close(composer),
+                "restore" => h.mgr.did_change(
+                    composer,
+                    2,
+                    &[AppliedChange { range: rng(0, 0, 0, 2), text: MANIFEST.into() }],
+                    &|| MANIFEST.into(),
+                ),
+                "save" => {
+                    let saved = r#"{"require":{"laravel/framework":"13.37.0"},"extra":{"openstormTest":true}}"#;
+                    std::fs::write(&manifest, saved).unwrap();
+                    h.mgr.did_save(composer, saved);
+                    h.mgr.php_files_changed(&[], std::slice::from_ref(&manifest), &[]);
+                }
+                _ => unreachable!(),
+            }
+            eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+            assert_eq!(state.requested(METHOD).len(), 2, "{action}");
+        }
+        assert_eq!(state.requested("textDocument/hover").len(), 1, "{action}: no new PHP request");
+        assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_composer_input_changes_cancel_held_admission_and_keep_foreground_priority() {
+    for action in ["dirty edit", "foreground", "close", "disable"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        let manifest = h.root.join("composer.json");
+        std::fs::write(&manifest, MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+            METHOD => {
+                if state.requested(METHOD).len() == 2 { held.hold(); }
+                Some(echo(params, resource.parent()))
+            }
+            "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+            _ => None,
+        }));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = DocId::next();
+        h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap();
+        let composer = DocId::next();
+        h.mgr.did_open(composer, &manifest, &LanguageId::new("json"), 1, MANIFEST);
+        eventually(|| gate.entered()).await;
+        match action {
+            "dirty edit" => h.mgr.did_change(
+                composer,
+                2,
+                &[AppliedChange { range: rng(0, 0, 0, MANIFEST.encode_utf16().count() as u32), text: "{}".into() }],
+                &|| "{}".into(),
+            ),
+            "foreground" => {
+                let hover = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    h.mgr.hover(caller, Pos::new(0, 10), Default::default()),
+                )
+                .await
+                .expect("foreground PHP supersedes Composer reconciliation")
+                .unwrap()
+                .unwrap();
+                assert_eq!(hover.contents.value, TEXT);
+            }
+            "close" => h.mgr.did_close(catalog),
+            "disable" => h.mgr.set_execution_allowed(false),
+            _ => unreachable!(),
+        }
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if action != "foreground" {
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{action}");
+        }
+        if action == "dirty edit" {
+            assert_eq!(state.requested(METHOD).len(), 2, "dirty buffer cannot refresh from saved manifest");
+            h.mgr.did_close(composer);
+            eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        }
+        let opens = state
+            .notified("textDocument/didOpen")
+            .iter()
+            .filter(|params| params["textDocument"]["uri"] == uri_of(&path))
+            .count();
+        assert_eq!(opens, if action == "foreground" || action == "dirty edit" { 2 } else { 1 }, "{action}");
+        assert_eq!(state.requested("textDocument/hover").len(), if action == "foreground" { 2 } else { 1 });
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_other_consumer_composer_changes_retire_selected_catalogs_and_recheck_ambiguity() {
+    for action in ["discard dirty", "save ambiguous"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        let first = h.root.join("composer.json");
+        std::fs::write(&first, MANIFEST).unwrap();
+        let nested = h.root.join("consumers/other");
+        std::fs::create_dir_all(&nested).unwrap();
+        let second = nested.join("composer.json");
+        std::fs::write(&second, MANIFEST).unwrap();
+        let second_uri = uri_of(&second);
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let ambiguous = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let positive = ambiguous.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |_, method, params| {
+            (method == METHOD).then(|| {
+                echo(
+                    params,
+                    (params["projectUri"] != second_uri || positive.load(Ordering::SeqCst))
+                        .then(|| resource.parent().unwrap()),
+                )
+            })
+        }));
+        let (caller, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        let (other, _) = h.open("consumers/other/Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        h.mgr.hover(caller, Pos::new(0, 10), Default::default()).await.unwrap();
+        let composer = DocId::next();
+        let updated = r#"{"require":{"laravel/framework":"13.37.0"},"extra":{"openstormTest":true}}"#;
+        h.mgr.did_open(composer, &second, &LanguageId::new("json"), 1, updated);
+        eventually(|| !state.docs.lock().contains_key(&uri_of(&path))).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!state.docs.lock().contains_key(&uri_of(&path)), "dirty unselected contexts invalidate uniqueness");
+        if action == "discard dirty" {
+            h.mgr.did_close(composer);
+        } else {
+            ambiguous.store(true, Ordering::SeqCst);
+            std::fs::write(&second, updated).unwrap();
+            let before = state.requested(METHOD).len();
+            h.mgr.did_save(composer, updated);
+            eventually(|| state.requested(METHOD).len() >= before + 2).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                !state.docs.lock().contains_key(&uri_of(&path)),
+                "a newly positive second context remains ambiguous"
+            );
+            h.mgr.did_close(other);
+        }
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        assert_eq!(state.requested("textDocument/hover").len(), 1);
+        assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}

@@ -697,6 +697,71 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
                 pid_before_reconfiguration
             );
         }
+        let manifest = f.root.join("composer.json");
+        let original_manifest = extra.iter().find(|(name, _)| name == "composer.json").unwrap().1.as_str();
+        let mut saved_manifest: serde_json::Value = serde_json::from_str(original_manifest).unwrap();
+        saved_manifest["extra"] = serde_json::json!({"openstormTest":true});
+        let saved_manifest = serde_json::to_string(&saved_manifest).unwrap();
+        let mut composer = None;
+        for action in ["clean open", "discard", "restore", "save", "restore saved", "close"] {
+            let before = opens();
+            match action {
+                "clean open" => composer = Some(f.project.documents.open(&manifest).unwrap().id),
+                "discard" => {
+                    let id = composer.take().unwrap();
+                    f.project.documents.replace_all(id, "{}").unwrap();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(opens(), before, "dirty Composer cannot authorize catalog text");
+                    assert_eq!(frames().last().unwrap()["method"], "textDocument/didClose");
+                    f.project.documents.close(id);
+                }
+                "restore" => {
+                    let id = f.project.documents.open(&manifest).unwrap().id;
+                    composer = Some(id);
+                    f.project.documents.replace_all(id, "{}").unwrap();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(opens(), before);
+                    assert_eq!(frames().last().unwrap()["method"], "textDocument/didClose");
+                    f.project.documents.replace_all(id, original_manifest).unwrap();
+                }
+                "save" => {
+                    let id = composer.unwrap();
+                    f.project.documents.replace_all(id, &saved_manifest).unwrap();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(opens(), before);
+                    assert_eq!(frames().last().unwrap()["method"], "textDocument/didClose");
+                    f.project.documents.save(id).unwrap();
+                    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), saved_manifest);
+                    serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+                }
+                "restore saved" => {
+                    let id = composer.unwrap();
+                    f.project.documents.replace_all(id, original_manifest).unwrap();
+                    f.project.documents.save(id).unwrap();
+                    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), original_manifest);
+                }
+                "close" => f.project.documents.close(composer.take().unwrap()),
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !frames()
+                    .iter()
+                    .filter(|event| event["method"] == "textDocument/didOpen")
+                    .skip(before)
+                    .any(|event| event["version"] == private_version)
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("managed Composer {action} must re-admit the private catalog before PHP navigation")
+            });
+            assert_eq!(
+                f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid,
+                pid_before_reconfiguration
+            );
+        }
         let opens_before_navigation = opens();
         for _ in 0..2 {
             let hover = ide_host::ops::lsp::lsp_hover(

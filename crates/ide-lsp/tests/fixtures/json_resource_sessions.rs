@@ -367,6 +367,62 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
                 pid_before_reconfiguration
             );
         }
+        let manifest = root.join("composer.json");
+        let composer = DocId::next();
+        let mut saved_manifest: serde_json::Value = serde_json::from_str(COMPOSER).unwrap();
+        saved_manifest["extra"] = serde_json::json!({"openstormTest":true});
+        let saved_manifest = serde_json::to_string(&saved_manifest).unwrap();
+        for action in ["clean open", "discard", "restore", "save", "restore saved", "close"] {
+            let before = count("textDocument/didOpen");
+            match action {
+                "clean open" => mgr.did_open(composer, &manifest, &LanguageId::new("json"), 1, COMPOSER),
+                "discard" => {
+                    replace(&mgr, composer, 2, COMPOSER, "{}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(count("textDocument/didOpen"), before, "dirty Composer cannot authorize catalog text");
+                    assert_eq!(count("textDocument/didClose"), before);
+                    mgr.did_close(composer);
+                }
+                "restore" => {
+                    mgr.did_open(composer, &manifest, &LanguageId::new("json"), 3, "{}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(count("textDocument/didOpen"), before);
+                    assert_eq!(count("textDocument/didClose"), before);
+                    replace(&mgr, composer, 4, "{}", COMPOSER);
+                }
+                "save" => {
+                    replace(&mgr, composer, 5, COMPOSER, &saved_manifest);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(count("textDocument/didOpen"), before);
+                    assert_eq!(count("textDocument/didClose"), before);
+                    std::fs::write(&manifest, &saved_manifest).unwrap();
+                    mgr.did_save(composer, &saved_manifest);
+                    mgr.php_files_changed(&[], std::slice::from_ref(&manifest), &[]);
+                }
+                "restore saved" => {
+                    replace(&mgr, composer, 6, &saved_manifest, COMPOSER);
+                    std::fs::write(&manifest, COMPOSER).unwrap();
+                    mgr.did_save(composer, COMPOSER);
+                    mgr.php_files_changed(&[], std::slice::from_ref(&manifest), &[]);
+                }
+                "close" => mgr.did_close(composer),
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while count("textDocument/didOpen") <= before {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("Composer {action} must re-admit the catalog before PHP navigation"));
+            assert_eq!(
+                mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid,
+                pid_before_reconfiguration
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), COMPOSER);
+        let opens_before_navigation = count("textDocument/didOpen");
+        let closes_before_navigation = count("textDocument/didClose");
         for _ in 0..2 {
             let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
             assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
@@ -375,12 +431,20 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             assert_eq!(targets[0].path.to_path_buf(), catalog);
             assert_eq!(targets[0].range.start, pos(OVERLAY, "Greeting 😀"));
         }
-        assert_eq!(count("textDocument/didOpen"), 7, "unchanged PHP requests reuse the refreshed overlay");
-        assert_eq!(count("textDocument/didClose"), 6, "PHP lifecycle and configuration changes retire their sessions");
+        assert_eq!(
+            count("textDocument/didOpen"),
+            opens_before_navigation,
+            "unchanged PHP requests reuse the refreshed overlay"
+        );
+        assert_eq!(
+            count("textDocument/didClose"),
+            closes_before_navigation,
+            "unchanged PHP requests retain the refreshed overlay"
+        );
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;
         replace(&mgr, json, 2, OVERLAY, updated);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while count("textDocument/didOpen") != 8 {
+            while count("textDocument/didOpen") != opens_before_navigation + 1 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })

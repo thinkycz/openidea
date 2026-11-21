@@ -90,10 +90,19 @@ impl LspManager {
         }
     }
 
-    pub(crate) fn discover_json_catalogs_for_php_document(&self, doc: DocId) {
+    pub(crate) fn json_composer_input(path: &Path, canonical: &Path) -> bool {
+        [path, canonical].iter().any(|path| path.file_name().is_some_and(|name| name == "composer.json"))
+    }
+
+    pub(crate) fn discover_json_catalogs_for_input_document(&self, doc: DocId) {
         let servers = {
             let docs = self.docs.lock();
             let Some(source) = docs.get(&doc) else { return };
+            if Self::json_composer_input(&source.path, &source.canonical) {
+                drop(docs);
+                self.discover_json_catalogs_for_running_servers();
+                return;
+            }
             if source.language.as_str() != "php" {
                 return;
             }

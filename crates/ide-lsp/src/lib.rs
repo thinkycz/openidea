@@ -1385,9 +1385,7 @@ impl LspManager {
             let mut docs = self.docs.lock();
             if Self::json_catalog_path(&state.path, &state.uri, &state.language) {
                 self.record_json_catalog_change();
-            } else if state.language.as_str() == "php"
-                || state.path.file_name().is_some_and(|name| name == "composer.json")
-            {
+            } else if state.language.as_str() == "php" || Self::json_composer_input(&state.path, &state.canonical) {
                 self.invalidate_json_preparation();
             }
             if self.json_resource_count.load(Ordering::Acquire) != 0 {
@@ -1434,7 +1432,7 @@ impl LspManager {
                 self.runtime.spawn(async move { hint.check_vue_navigation(&server).await });
             }
         }
-        self.discover_json_catalogs_for_php_document(doc);
+        self.discover_json_catalogs_for_input_document(doc);
         self.discover_json_document(doc);
     }
 
@@ -1513,7 +1511,7 @@ impl LspManager {
             false
         };
         drop(docs);
-        self.discover_json_catalogs_for_php_document(doc);
+        self.discover_json_catalogs_for_input_document(doc);
         if compose_changed && let Some(me) = self.me.upgrade() {
             me.reconfigure_soon();
         }
@@ -1574,7 +1572,7 @@ impl LspManager {
             }
         }
         drop(docs);
-        self.discover_json_catalogs_for_php_document(doc);
+        self.discover_json_catalogs_for_input_document(doc);
         self.schedule_pull(doc, None, Duration::ZERO);
         self.pull_dependents(doc);
         self.go_mod_saved(doc);
@@ -1612,6 +1610,9 @@ impl LspManager {
             if d.language.as_str() == "php" && a.resource.is_none() {
                 self.discover_json_catalogs_for_server(&a.server, run.generation);
             }
+        }
+        if Self::json_composer_input(&d.path, &d.canonical) {
+            self.discover_json_catalogs_for_running_servers();
         }
     }
 

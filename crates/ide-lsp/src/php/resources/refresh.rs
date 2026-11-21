@@ -77,6 +77,39 @@ impl LspManager {
         self.cancel_json_refreshes(|key| ids.contains(&key.doc));
     }
 
+    pub(crate) fn discover_json_catalogs_on_ready(&self, server: &Arc<Server>, generation: u64) {
+        if server.name != "phpantom"
+            || self.shutting_down.load(Ordering::Acquire)
+            || !self.execution_allowed.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let Some(run) = server.running_gen(generation) else { return };
+        if !supports_resources(&run.caps.read()) {
+            return;
+        }
+        let catalogs = {
+            let docs = self.docs.lock();
+            if !docs.values().any(|doc| {
+                doc.language.as_str() == "php"
+                    && doc.servers.iter().any(|attached| {
+                        attached.resource.is_none()
+                            && attached.server.id == server.id
+                            && attached.opened_gen == Some(generation)
+                    })
+            }) {
+                return;
+            }
+            docs.iter()
+                .filter(|(_, doc)| Self::json_catalog_path(&doc.path, &doc.uri, &doc.language))
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        };
+        for doc in catalogs {
+            self.queue_json_refresh(JsonRefreshKey { doc, server: server.id, generation }, server.clone(), None);
+        }
+    }
+
     pub(crate) fn discover_json_document(&self, doc: DocId) {
         if self.shutting_down.load(Ordering::Acquire) || !self.execution_allowed.load(Ordering::Acquire) {
             return;

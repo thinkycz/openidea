@@ -271,7 +271,6 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         let alternate = root.join("packages/billing/alternate/en.json");
         mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, OVERLAY);
         assert!(mgr.servers().is_empty(), "catalog opening alone does not launch a PHP server");
-        mgr.did_close(json);
         mgr.did_open(caller, &root.join("app/Caller.php"), &LanguageId::new("php"), 1, CALLER);
         mgr.did_open(provider, &root.join("app/Provider.php"), &LanguageId::new("php"), 1, PROVIDER);
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -282,7 +281,7 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             }
         })
         .await
-        .expect("PHP consumer ready before catalog opening");
+        .expect("PHP consumer becomes ready with the catalog already open");
         let count = |method: &str| {
             std::fs::read_to_string(control.join("events.jsonl"))
                 .unwrap_or_default()
@@ -291,15 +290,13 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
                 .filter(|event| event["method"] == method && event["uri"] == ide_lsp::path_to_uri_string(&catalog))
                 .count()
         };
-        let json = DocId::next();
-        mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, OVERLAY);
         tokio::time::timeout(Duration::from_secs(5), async {
             while count("textDocument/didOpen") != 1 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("new catalog must be admitted before the first PHP request");
+        .expect("already-open catalog must be admitted on PHP readiness before the first PHP request");
         for _ in 0..2 {
             let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
             assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
@@ -336,7 +333,15 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
         assert!(hover.contents.value.contains("Updated private value"));
         let server = mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+        let opens_before_restart = count("textDocument/didOpen");
         mgr.restart(server).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") <= opens_before_restart {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("restart must re-admit the open catalog before another PHP request");
         let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
         assert!(
             hover.contents.value.contains("Updated private value"),

@@ -1175,6 +1175,7 @@ impl LspManager {
             self.schedule_pull(doc, Some(&server), Duration::ZERO);
         }
         self.reopen_notebooks(&server, &run);
+        self.discover_json_catalogs_on_ready(&server, generation);
         self.check_clang_tidy(&server).await;
         self.check_vue_navigation(&server).await;
         server.refresh_busy_status(&self.sink);

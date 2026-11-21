@@ -718,7 +718,21 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         assert_eq!(targets[0].path.to_path_buf(), path);
         assert_eq!(targets[0].range, key_range(draft, "Draft 😀"));
         let server = f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+        let opens_before_restart = opens();
+        let restart_version = f.project.documents.version(catalog.id).unwrap();
         f.project.lsp.restart(server).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !frames()
+                .iter()
+                .filter(|event| event["method"] == "textDocument/didOpen")
+                .skip(opens_before_restart)
+                .any(|event| event["version"] == restart_version)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("managed catalog must be re-admitted after restart before another PHP command");
         let hover = ide_host::ops::lsp::lsp_hover(
             &f.host,
             "main",

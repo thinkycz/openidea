@@ -1024,14 +1024,24 @@ async fn registered_json_background_refresh_retires_held_admission_and_yields_to
             "close" => h.mgr.did_close(catalog),
             "disable" => h.mgr.set_execution_allowed(false),
             "restart" => {
+                h.mgr.did_change(
+                    catalog,
+                    3,
+                    &[AppliedChange {
+                        range: rng(0, 0, 0, updated.encode_utf16().count() as u32),
+                        text: latest.into(),
+                    }],
+                    &|| latest.into(),
+                );
                 let server = h.mgr.servers().into_iter().find(|s| s.name == "phpantom").unwrap().id;
                 h.mgr.restart(server).await.unwrap();
+                eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(latest)).await;
             }
             _ => unreachable!(),
         }
         gate.open();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if change != "edit" {
+        if change != "edit" && change != "restart" {
             assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{change}");
         }
         assert!(
@@ -1210,8 +1220,16 @@ async fn registered_json_discovery_yields_to_foreground_and_lifecycle_changes_be
             "close" => h.mgr.did_close(catalog),
             "disable" => h.mgr.set_execution_allowed(false),
             "restart" => {
+                let latest = r#"{"Greeting 😀":"New generation overlay"}"#;
+                h.mgr.did_change(
+                    catalog,
+                    2,
+                    &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: latest.into() }],
+                    &|| latest.into(),
+                );
                 let server = h.mgr.servers().into_iter().find(|s| s.name == "phpantom").unwrap().id;
                 h.mgr.restart(server).await.unwrap();
+                eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(latest)).await;
             }
             _ => unreachable!(),
         }
@@ -1222,7 +1240,11 @@ async fn registered_json_discovery_yields_to_foreground_and_lifecycle_changes_be
             .into_iter()
             .filter(|params| params["textDocument"]["uri"] == uri_of(&path))
             .collect();
-        assert_eq!(opens.len(), usize::from(change == "foreground"), "{change}");
+        assert_eq!(opens.len(), usize::from(change == "foreground" || change == "restart"), "{change}");
+        if change == "restart" {
+            assert_eq!(opens[0]["textDocument"]["version"], 2);
+            assert_eq!(opens[0]["textDocument"]["text"], r#"{"Greeting 😀":"New generation overlay"}"#);
+        }
         h.mgr.shutdown_all().await;
     }
 }
@@ -1308,6 +1330,86 @@ async fn registered_json_discovery_rechecks_other_composer_witnesses_after_final
         );
         h.mgr.did_close(other);
         eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_readiness_discovers_catalogs_opened_before_php_without_a_php_request() {
+    for timing in ["before PHP", "during initialize", "closed during initialize", "disabled during initialize"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let state = h.launcher.state("phpantom");
+        state
+            .responder
+            .lock()
+            .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+        let gate = Arc::new(Gate::default());
+        *state.initialize_gate.lock() = Some(gate.clone());
+        let catalog = DocId::next();
+        if timing == "before PHP" {
+            h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(h.mgr.servers().is_empty(), "JSON alone cannot start PHP");
+        }
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        eventually(|| gate.entered()).await;
+        if timing != "before PHP" {
+            h.mgr.did_open(catalog, &path, &LanguageId::new("json"), 1, TEXT);
+        }
+        let current = r#"{"Greeting 😀":"Latest during startup"}"#;
+        h.mgr.did_change(
+            catalog,
+            2,
+            &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: current.into() }],
+            &|| current.into(),
+        );
+        if timing == "closed during initialize" {
+            h.mgr.did_close(catalog);
+        } else if timing == "disabled during initialize" {
+            h.mgr.set_execution_allowed(false);
+        }
+        assert!(!state.docs.lock().contains_key(&uri_of(&path)));
+        assert!(state.requested(METHOD).is_empty());
+        gate.open();
+        if timing == "before PHP" || timing == "during initialize" {
+            eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(current)).await;
+            assert_eq!(state.requested(METHOD).len(), 1, "{timing}");
+            if timing == "before PHP" {
+                let opens = state.notified("textDocument/didOpen").len();
+                let server = h.mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+                h.mgr.restart(server).await.unwrap();
+                eventually(|| state.notified("textDocument/didOpen").len() >= opens + 2).await;
+                assert_eq!(state.docs.lock().get(&uri_of(&path)).map(String::as_str), Some(current));
+                assert_eq!(state.requested(METHOD).len(), 2, "restart revalidates registration");
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{timing}");
+            assert!(state.requested(METHOD).is_empty(), "{timing}");
+        }
+        assert!(state.requested("textDocument/hover").is_empty());
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_readiness_preserves_server_choices_and_requires_resource_capabilities() {
+    for (name, advertised) in [("phpantom", false), ("phpactor", true), ("intelephense", true)] {
+        let h = harness_for("php", "php", &[(name, if advertised { caps() } else { incremental_caps() })], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        assert!(h.mgr.servers().is_empty());
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status(name, ServerStatus::Ready).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let state = h.launcher.state(name);
+        assert!(state.requested(METHOD).is_empty(), "{name}");
+        assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{name}");
         h.mgr.shutdown_all().await;
     }
 }

@@ -1750,3 +1750,160 @@ async fn registered_json_php_lifecycle_reconciliation_cancels_stale_admission_an
         h.mgr.shutdown_all().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_reconfiguration_readmits_catalogs_without_navigation_or_restart() {
+    for change in ["settings", "unchanged settings", "content roots"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let settings: Arc<Mutex<Option<Value>>> = Default::default();
+        let current = settings.clone();
+        h.mgr.set_config_hook(Box::new(move |cfg, _| cfg.settings = current.lock().clone()));
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let state = h.launcher.state("phpantom");
+        state
+            .responder
+            .lock()
+            .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+        h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let server = h.mgr.servers()[0].id;
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+        match change {
+            "settings" => {
+                *settings.lock() = Some(json!({"openstormTest":{"revision":1}}));
+                h.mgr.reconfigure().await;
+            }
+            "unchanged settings" => h.mgr.reconfigure().await,
+            "content roots" => {
+                let root = h.root.join("additional");
+                std::fs::create_dir(&root).unwrap();
+                h.mgr.set_content_roots(vec![root]);
+            }
+            _ => unreachable!(),
+        }
+        eventually(|| {
+            state
+                .notified("textDocument/didOpen")
+                .iter()
+                .filter(|params| params["textDocument"]["uri"] == uri_of(&path))
+                .count()
+                == 2
+        })
+        .await;
+        assert_eq!(state.docs.lock().get(&uri_of(&path)).map(String::as_str), Some(TEXT));
+        assert_eq!(state.requested(METHOD).len(), 2, "{change}: revalidate before sharing");
+        assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(h.mgr.servers()[0].id, server);
+        assert!(state.requested("textDocument/hover").is_empty());
+        assert!(!path.exists());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_content_root_reconciliation_preserves_boundaries_and_server_choices() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    let external = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(external.path()).unwrap();
+    std::fs::write(root.join("composer.json"), MANIFEST).unwrap();
+    let source = root.join("Caller.php");
+    std::fs::write(&source, "<?php __('Greeting 😀');").unwrap();
+    let path = root.join("catalogs/en.json");
+    let resource = path.clone();
+    let state = h.launcher.state("phpantom");
+    state
+        .responder
+        .lock()
+        .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+    h.mgr.set_content_roots(vec![root.clone()]);
+    h.mgr.did_open(DocId::next(), &source, &LanguageId::new("php"), 1, "<?php __('Greeting 😀');");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    h.mgr.set_content_roots(vec![]);
+    eventually(|| !state.docs.lock().contains_key(&uri_of(&path))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(state.requested(METHOD).len(), 1, "removed roots cannot be queried or shared");
+    h.mgr.set_content_roots(vec![root]);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    assert_eq!(state.requested(METHOD).len(), 2);
+    assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+    h.mgr.shutdown_all().await;
+
+    for (name, advertised) in [("phpantom", false), ("phpactor", true), ("intelephense", true)] {
+        let h = harness_for("php", "php", &[(name, if advertised { caps() } else { incremental_caps() })], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        h.open("Caller.php", "<?php");
+        h.wait_status(name, ServerStatus::Ready).await;
+        let path = h.root.join("catalogs/en.json");
+        h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+        h.mgr.reconfigure().await;
+        h.mgr.set_content_roots(vec![h.root.join("additional")]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let state = h.launcher.state(name);
+        assert!(state.requested(METHOD).is_empty(), "{name}");
+        assert!(!state.docs.lock().contains_key(&uri_of(&path)), "{name}");
+        assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+        h.mgr.shutdown_all().await;
+    }
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    h.mgr.did_open(DocId::next(), &h.root.join("catalogs/en.json"), &LanguageId::new("json"), 1, TEXT);
+    h.mgr.reconfigure().await;
+    h.mgr.set_content_roots(vec![h.root.join("additional")]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.mgr.servers().is_empty(), "JSON-only reconfiguration cannot start PHP");
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_discovery_waits_until_every_reconfiguration_pass_finishes() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let revision = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gate = Arc::new(Gate::default());
+    let (current, held) = (revision.clone(), gate.clone());
+    h.mgr.set_config_hook(Box::new(move |cfg, _| {
+        let value = current.load(Ordering::SeqCst);
+        if value == 1 {
+            held.hold();
+        }
+        cfg.settings = Some(json!({"openstormTest":{"revision":value}}));
+    }));
+    let path = h.root.join("catalogs/en.json");
+    let resource = path.clone();
+    let state = h.launcher.state("phpantom");
+    state
+        .responder
+        .lock()
+        .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, resource.parent()))));
+    h.open("Caller.php", "<?php __('Greeting 😀');");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    h.mgr.did_open(DocId::next(), &path, &LanguageId::new("json"), 1, TEXT);
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    revision.store(1, Ordering::SeqCst);
+    let first = tokio::spawn({
+        let manager = h.mgr.clone();
+        async move { manager.reconfigure().await }
+    });
+    eventually(|| gate.entered()).await;
+    revision.store(2, Ordering::SeqCst);
+    let mut second = Box::pin(h.mgr.reconfigure());
+    assert!(futures::poll!(&mut second).is_pending(), "second pass waits for the reconfiguration lock");
+    gate.open();
+    first.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(!state.docs.lock().contains_key(&uri_of(&path)), "a pending configuration pass cannot publish a catalog");
+    assert_eq!(state.requested(METHOD).len(), 1, "metadata waits for every pass to finish");
+    second.await;
+    eventually(|| state.docs.lock().get(&uri_of(&path)).map(String::as_str) == Some(TEXT)).await;
+    assert_eq!(state.requested(METHOD).len(), 2);
+    assert_eq!(
+        state.notified("workspace/didChangeConfiguration").last().unwrap()["settings"]["openstormTest"]["revision"],
+        2
+    );
+    assert_eq!(state.launches.load(Ordering::SeqCst), 1);
+    h.mgr.shutdown_all().await;
+}

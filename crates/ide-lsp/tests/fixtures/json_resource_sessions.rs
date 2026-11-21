@@ -335,6 +335,38 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         })
         .await
         .expect("PHP close must re-admit the catalog for remaining consumers before navigation");
+        let pid_before_reconfiguration =
+            mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid;
+        assert!(pid_before_reconfiguration.is_some());
+        for change in ["settings", "unchanged settings", "content roots"] {
+            let before = count("textDocument/didOpen");
+            match change {
+                "settings" => {
+                    mgr.set_config_hook(Box::new(|cfg, _| {
+                        cfg.settings = Some(serde_json::json!({"openstormTest":{"revision":1}}))
+                    }));
+                    mgr.reconfigure().await;
+                }
+                "unchanged settings" => mgr.reconfigure().await,
+                "content roots" => {
+                    let additional = root.join("additional");
+                    std::fs::create_dir(&additional).unwrap();
+                    mgr.set_content_roots(vec![additional]);
+                }
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while count("textDocument/didOpen") <= before {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{change} must re-admit the catalog before PHP navigation"));
+            assert_eq!(
+                mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid,
+                pid_before_reconfiguration
+            );
+        }
         for _ in 0..2 {
             let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
             assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
@@ -343,12 +375,12 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             assert_eq!(targets[0].path.to_path_buf(), catalog);
             assert_eq!(targets[0].range.start, pos(OVERLAY, "Greeting 😀"));
         }
-        assert_eq!(count("textDocument/didOpen"), 4, "unchanged PHP requests reuse the refreshed overlay");
-        assert_eq!(count("textDocument/didClose"), 3, "PHP lifecycle changes retire their prior sessions");
+        assert_eq!(count("textDocument/didOpen"), 7, "unchanged PHP requests reuse the refreshed overlay");
+        assert_eq!(count("textDocument/didClose"), 6, "PHP lifecycle and configuration changes retire their sessions");
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;
         replace(&mgr, json, 2, OVERLAY, updated);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while count("textDocument/didOpen") != 5 {
+            while count("textDocument/didOpen") != 8 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })

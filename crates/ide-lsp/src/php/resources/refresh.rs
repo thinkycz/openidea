@@ -34,9 +34,13 @@ impl Drop for RefreshTask {
 }
 
 impl LspManager {
-    pub(crate) fn retire_json_resources_for_publication(&self) -> JsonRefreshPublication<'_> {
+    pub(crate) fn json_refresh_publication(&self) -> JsonRefreshPublication<'_> {
         self.json_refresh_publications.fetch_add(1, Ordering::AcqRel);
-        let publication = JsonRefreshPublication(self);
+        JsonRefreshPublication(self)
+    }
+
+    pub(crate) fn retire_json_resources_for_publication(&self) -> JsonRefreshPublication<'_> {
+        let publication = self.json_refresh_publication();
         let mut docs = self.docs.lock();
         if self.json_resource_count.load(Ordering::Acquire) != 0 {
             let ids: Vec<_> = docs
@@ -75,6 +79,15 @@ impl LspManager {
     pub(super) fn cancel_json_refreshes_for_document_path(&self, path: &Path) {
         let ids: Vec<_> = self.docs.lock().iter().filter(|(_, doc)| doc.path == path).map(|(id, _)| *id).collect();
         self.cancel_json_refreshes(|key| ids.contains(&key.doc));
+    }
+
+    pub(crate) fn discover_json_catalogs_for_running_servers(&self) {
+        let servers = self.servers.lock().clone();
+        for server in servers {
+            if let Some(run) = server.running() {
+                self.discover_json_catalogs_for_server(&server, run.generation);
+            }
+        }
     }
 
     pub(crate) fn discover_json_catalogs_for_php_document(&self, doc: DocId) {

@@ -541,11 +541,16 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         ("packages/billing/composer.json".into(), r#"{"name":"acme/billing"}"#.into()),
         ("packages/billing/json/en.json".into(), json.into()),
     ];
+    let configuration_revision = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let configured_revision = configuration_revision.clone();
     let (f, control) = Fixture::new_at_with_fixture_setup(
         caller,
         &extra,
         "app/Caller.php",
-        |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+        |root| {
+            std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap();
+            std::fs::create_dir(root.join("additional")).unwrap();
+        },
         move |project, temp| {
             let control = temp.join("control");
             std::fs::create_dir(&control).unwrap();
@@ -556,6 +561,8 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             let selected = control.clone();
             project.lsp.set_config_hook(Box::new(move |cfg, _| {
                 if cfg.name == "phpantom" {
+                    cfg.settings = Some(serde_json::json!({"openstormTest":{"revision":
+                        configured_revision.load(std::sync::atomic::Ordering::SeqCst)}}));
                     let args = std::mem::take(&mut cfg.args);
                     cfg.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
                     cfg.args = vec![
@@ -658,6 +665,37 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             })
             .await
             .unwrap_or_else(|_| panic!("managed PHP {action} must re-admit the private catalog before navigation"));
+        }
+        let pid_before_reconfiguration =
+            f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid;
+        assert!(pid_before_reconfiguration.is_some());
+        for change in ["settings", "unchanged settings", "content roots"] {
+            let before = opens();
+            match change {
+                "settings" => {
+                    configuration_revision.store(1, std::sync::atomic::Ordering::SeqCst);
+                    f.project.lsp.reconfigure().await;
+                }
+                "unchanged settings" => f.project.lsp.reconfigure().await,
+                "content roots" => f.project.lsp.set_content_roots(vec![f.root.join("additional")]),
+                _ => unreachable!(),
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !frames()
+                    .iter()
+                    .filter(|event| event["method"] == "textDocument/didOpen")
+                    .skip(before)
+                    .any(|event| event["version"] == private_version)
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("managed {change} must re-admit the private catalog before PHP navigation"));
+            assert_eq!(
+                f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().pid,
+                pid_before_reconfiguration
+            );
         }
         let opens_before_navigation = opens();
         for _ in 0..2 {

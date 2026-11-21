@@ -627,6 +627,7 @@ impl LspManager {
         if changed {
             self.retire_json_resources();
             self.project_files_revision.fetch_add(1, Ordering::AcqRel);
+            self.discover_json_catalogs_for_running_servers();
         }
         if changed
             && self.desired_jdtls_workspace().0
@@ -4480,6 +4481,7 @@ impl LspManager {
     }
 
     pub async fn reconfigure(&self) {
+        let _publication = self.json_refresh_publication();
         // Settings-only notifications retain the server generation; retire
         // navigation receipts before any asynchronous reconfiguration work.
         self.retire_json_resources();
@@ -4552,6 +4554,7 @@ impl LspManager {
         self.attach_fallbacks();
         self.detach_shadowed_fallbacks().await;
         self.injection_providers_changed();
+        self.discover_json_catalogs_for_running_servers();
     }
 
     async fn reconfigure_jdtls_workspace(&self) {

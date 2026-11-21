@@ -15,6 +15,63 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Translation catalog first-save slice 233 (regression acceptance):
+FEAT-001/015/031/066/068: four real Host cases now cover an untitled PHP or JSON
+translation catalog saved into its first Laravel path, with cold and warm PHP
+servers. The test requires immediate exact UTF-16 definitions and value hover,
+catalog-origin references, stable DocId/version and physical-path rekeying. It
+removes a key in the unsaved catalog, verifies the old target/value disappear,
+and navigates a dirty caller to the new unsaved key both before and after engine
+restart. Closing the dirty catalog restores its saved declarations; reopening
+retains them. Caller and catalog disk bytes remain unchanged during intelligence
+queries, and all eight owned PHPantom PIDs exit after fixture shutdown. No empty
+result or incorrect-hover retries and no watcher barrier are used.
+
+The first fixture opened a PHP caller before asserting a cold server; that setup
+failure occurred before Save As. The corrected cold setup keeps the caller closed
+until after saving; the warm setup explicitly opens it and awaits a real LSP round
+trip. A second expectation incorrectly required missing-key hover to be absent;
+the observed generic translation-key documentation is valid. The accepted check
+requires no definition and no stale value, and adds positive unsaved-key targets
+so discarding the whole dirty catalog cannot pass. Both failed attempts and their
+corrections are retained. They do not establish a production defect.
+
+Source inventory also records inherited static Artisan serve detection and opt-in
+PHPStan/PHP-CS-Fixer paths in FEAT-038/041. The remaining Artisan command-runner
+and Pint/Larastan version/config/structured-result gates are explicit. These
+source observations establish no new runtime or whole-area acceptance.
+
+A separate controlled real-editor probe reproduces stale formatter application
+after metadata-only path, DocId or read-only changes in document and generated-
+line formatting. Four controls pass and six refusal assertions fail. Actual model read-only/relocation paths reconfigure
+metadata without replacing text. FEAT-018/066 retain this open client defect;
+its proof does not establish native Save As behavior. No production fix is mixed
+into this catalog slice. Fix formatter identity/writability guards next.
+
+The existing first-save client behavior passes these cases without production or
+engine changes. Fresh workspace checks pass 5,632 tests, with 265
+ignored and exactly 11 existing HTTP-confirmation/direnv exclusions.
+Workspace all-target Clippy with warnings denied and Rust formatting pass. All
+139 current actual-engine cases pass: 75 client and 64 Host, including 49
+completion Host cases. Fresh frontend types, lint, formatting, Knip, 14,603 tests
+(eight existing skips), production build/Safari compatibility and 17 controlled
+Laravel browser flows pass. The full pinned engine source suite is reused from
+unchanged engine 191 acceptance; it is not reported as a fresh engine rebuild.
+
+Only the newest six regression executables remain and all launch after compiler
+cleanup. Removed: Removed 20243 files, 29.9GiB total.
+Frontend dist removal: 73,745,139 bytes.
+The accepted signed App 121 remains the sole app with identical main executable
+and embedded engine bytes; this test-only slice needs no new application bundle.
+Source pins, licenses, WIT, settings and both stashes remain unchanged. No Composer
+or Artisan project boot is introduced. Native GUI/editor undo, initial Save As
+over existing closed targets, provider/custom catalog-root first-save, wider
+locale/project/configuration/concurrent/performance cases and the remaining
+roadmap remain open. All 69 areas retain 67 partial and two user-deferred states.
+Evidence: artifacts/checks/slice233/{real,gates,evaluation,frozen-runtimes,
+retention,retained-runtime-lists}.json and the retained initial failure logs.
+Normal commit/push and remote equality are recorded in the delivery receipt.
+
 Package slice 232 (local development App 121 accepted):
 OpenStorm 0.1.121 packages client slice 230 (shared-consumer provider preparation)
 and slice 231 (first-save publication and owned-directory watcher protection),

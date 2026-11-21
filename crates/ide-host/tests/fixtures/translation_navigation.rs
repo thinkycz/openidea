@@ -1217,3 +1217,155 @@ async fn untitled_translation_callers_keep_identity_dependencies_and_save_confli
         }
     }
 }
+
+async fn first_saved_catalog_target(f: &Fixture, caller: &str, key: &str, catalog: Option<(&str, &str)>) {
+    let position = key_range(caller, key).start;
+    let found = ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition).await.unwrap();
+    let hover = ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, position).await.unwrap();
+    if let Some((relative, text)) = catalog {
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].uri.is_none());
+        assert_eq!(found[0].path.to_path_buf(), f.root.join(relative));
+        let declaration = if relative.ends_with(".json") { key } else { key.rsplit('.').next().unwrap() };
+        assert_eq!(found[0].range, key_range(text, declaration));
+        let hover = hover.expect("first-saved catalog value must be readable");
+        assert_eq!(hover.range, Some(key_range(caller, key)));
+        assert!(hover.contents.value.contains("New catalog value"), "{hover:?}");
+    } else {
+        assert!(found.is_empty(), "{found:?}");
+        if let Some(hover) = hover {
+            assert_eq!(hover.range, Some(key_range(caller, key)));
+            assert!(!hover.contents.value.contains("New catalog value"), "{hover:?}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, owned PHP and Laravel 13.37 vendor fixture"]
+async fn untitled_translation_catalogs_publish_first_save_and_preserve_dirty_overlays() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor fixture"))
+        .canonicalize()
+        .unwrap();
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(vendor.join("composer/installed.json")).unwrap()).unwrap();
+    assert!(
+        installed["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| { p["name"] == "laravel/framework" && p["version"] == "v13.37.0" })
+    );
+    for (relative, key, catalog) in [
+        ("lang/en/messages.php", "messages.hello", "<?php /* 😀 */ return ['hello'=>'New catalog value'];"),
+        ("lang/en.json", "Greeting 😀", r#"{"Greeting 😀":"New catalog value"}"#),
+    ] {
+        if relative.ends_with(".php") {
+            Fixture::lint(catalog);
+        } else {
+            serde_json::from_str::<serde_json::Value>(catalog).unwrap();
+        }
+        let caller = format!("<?php /* 😀 */ return __('{key}');\n");
+        for warm in [false, true] {
+            println!("catalog first-save case path={relative} warm={warm}");
+            let (mut f, ()) = Fixture::new_at_with_fixture_setup(
+                "Translation catalog first-save fixture",
+                &[("app/Caller.php".into(), caller.clone())],
+                "notes.txt",
+                |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+                |_, _| (),
+            );
+            let mut owned_pids = Vec::new();
+            let outcome = std::panic::AssertUnwindSafe(async {
+                assert!(f.project.lsp.servers().is_empty());
+                let draft = ide_host::ops::doc::doc_open_untitled(&f.host, "main", None).await.unwrap();
+                let version = ide_host::ops::doc::doc_edit(
+                    &f.host,
+                    "main",
+                    draft.id,
+                    draft.version,
+                    ide_core::ChangeSet {
+                        changes: vec![ide_core::TextChange { from: 0, to: 0, insert: catalog.into() }],
+                    },
+                )
+                .await
+                .unwrap();
+                if warm {
+                    f.doc =
+                        ide_host::ops::doc::doc_open(&f.host, "main", f.root.join("app/Caller.php")).await.unwrap().id;
+                    first_saved_catalog_target(&f, &caller, key, None).await;
+                } else {
+                    assert!(f.project.lsp.servers().is_empty(), "first-save must exercise a cold PHP server");
+                }
+                let target = f.root.join(relative);
+                assert!(!target.exists());
+                let saved = ide_host::ops::doc::doc_save_as(&f.host, "main", draft.id, target.clone()).await.unwrap();
+                assert_eq!(saved.id, draft.id);
+                assert_eq!(saved.version, version);
+                assert!(!saved.dirty && saved.uri.is_none());
+                assert_eq!(saved.language.as_str(), if relative.ends_with(".php") { "php" } else { "json" });
+                assert_eq!(f.project.documents.by_path(&target), Some(draft.id));
+                assert_eq!(f.project.documents.by_path(&draft.path), None);
+                assert_eq!(std::fs::read_to_string(&target).unwrap(), catalog);
+                if !warm {
+                    f.doc =
+                        ide_host::ops::doc::doc_open(&f.host, "main", f.root.join("app/Caller.php")).await.unwrap().id;
+                }
+                first_saved_catalog_target(&f, &caller, key, Some((relative, catalog))).await;
+                let declaration = if relative.ends_with(".php") { "hello" } else { key };
+                let refs = ide_host::ops::lsp::lsp_references(
+                    &f.host,
+                    "main",
+                    RequestId::next(),
+                    draft.id,
+                    key_range(catalog, declaration).start,
+                    false,
+                    true,
+                    true,
+                    ide_host::ops::Channel::new(|_| {}),
+                )
+                .await
+                .unwrap();
+                assert!(refs.incomplete.is_none(), "{refs:?}");
+                assert_eq!(refs.locations.len(), 1, "{refs:?}");
+                assert_eq!(refs.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
+                assert_eq!(refs.locations[0].range, key_range(&caller, key));
+                let dirty = catalog.replace(declaration, "other");
+                f.project.documents.replace_all(draft.id, &dirty).unwrap();
+                first_saved_catalog_target(&f, &caller, key, None).await;
+                let dirty_key = if relative.ends_with(".php") { "messages.other" } else { "other" };
+                let dirty_caller = caller.replace(key, dirty_key);
+                f.project.documents.replace_all(f.doc, &dirty_caller).unwrap();
+                first_saved_catalog_target(&f, &dirty_caller, dirty_key, Some((relative, &dirty))).await;
+                let server = f.project.lsp.servers().into_iter().find(|s| s.name == "phpantom").unwrap();
+                owned_pids.push(server.pid.unwrap());
+                f.project.lsp.restart(server.id).await.unwrap();
+                first_saved_catalog_target(&f, &dirty_caller, dirty_key, Some((relative, &dirty))).await;
+                owned_pids.push(f.project.lsp.servers().into_iter().find(|s| s.id == server.id).unwrap().pid.unwrap());
+                assert_eq!(std::fs::read_to_string(&target).unwrap(), catalog);
+                f.project.documents.replace_all(f.doc, &caller).unwrap();
+                first_saved_catalog_target(&f, &caller, key, None).await;
+                f.project.documents.close(draft.id);
+                first_saved_catalog_target(&f, &caller, key, Some((relative, catalog))).await;
+                let reopened = ide_host::ops::doc::doc_open(&f.host, "main", target.clone()).await.unwrap();
+                assert!(!reopened.dirty);
+                first_saved_catalog_target(&f, &caller, key, Some((relative, catalog))).await;
+                assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), caller);
+                assert_eq!(std::fs::read_to_string(&target).unwrap(), catalog);
+            })
+            .catch_unwind()
+            .await;
+            f.finish(outcome).await;
+            for pid in owned_pids {
+                assert!(
+                    !std::process::Command::new("/bin/kill")
+                        .args(["-0", &pid.to_string()])
+                        .output()
+                        .unwrap()
+                        .status
+                        .success(),
+                    "owned catalog PHPantom process must exit after shutdown"
+                );
+            }
+        }
+    }
+}

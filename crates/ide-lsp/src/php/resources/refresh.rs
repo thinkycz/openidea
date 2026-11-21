@@ -106,6 +106,11 @@ impl LspManager {
             if source.language.as_str() != "php" {
                 return;
             }
+            if !docs.values().any(|doc| Self::json_catalog_path(&doc.path, &doc.uri, &doc.language)) {
+                drop(docs);
+                self.discover_json_catalogs_for_running_servers();
+                return;
+            }
             source
                 .servers
                 .iter()
@@ -143,6 +148,7 @@ impl LspManager {
             }) {
                 return;
             }
+            self.queue_provider_refresh_without_catalogs(&docs, server, generation, None);
             docs.iter()
                 .filter(|(_, doc)| Self::json_catalog_path(&doc.path, &doc.uri, &doc.language))
                 .map(|(id, _)| *id)
@@ -226,6 +232,12 @@ impl LspManager {
                 if !dependent || !seen.insert((attached.server.id, generation, resource.selector.clone())) {
                     continue;
                 }
+                self.queue_provider_refresh_without_catalogs(
+                    docs,
+                    &attached.server,
+                    generation,
+                    Some(resource.selector.clone()),
+                );
                 for (doc, catalog) in docs {
                     if Self::json_catalog_path(&catalog.path, &catalog.uri, &catalog.language) {
                         self.queue_json_refresh(
@@ -236,6 +248,37 @@ impl LspManager {
                     }
                 }
             }
+        }
+    }
+
+    fn queue_provider_refresh_without_catalogs(
+        &self,
+        docs: &HashMap<DocId, DocState>,
+        server: &Arc<Server>,
+        generation: u64,
+        project: Option<PathBuf>,
+    ) {
+        if docs.values().any(|doc| Self::json_catalog_path(&doc.path, &doc.uri, &doc.language))
+            || !server.running_gen(generation).is_some_and(|run| provider_sync::supported(&run.caps.read()))
+        {
+            return;
+        }
+        // One stable consumer anchors recovery; provider text still requires a
+        // fresh declared-source receipt before it can cross server boundaries.
+        let doc = docs
+            .iter()
+            .filter(|(_, doc)| {
+                doc.language.as_str() == "php"
+                    && doc.servers.iter().any(|attached| {
+                        attached.resource.is_none()
+                            && attached.server.id == server.id
+                            && attached.opened_gen == Some(generation)
+                    })
+            })
+            .min_by(|left, right| left.1.path.cmp(&right.1.path))
+            .map(|(doc, _)| *doc);
+        if let Some(doc) = doc {
+            self.queue_json_refresh(JsonRefreshKey { doc, server: server.id, generation }, server.clone(), project);
         }
     }
 
@@ -306,14 +349,32 @@ impl LspManager {
             return Ok(true);
         }
         let Ok(catalog) = self.snapshot(key.doc) else { return Ok(true) };
-        if !Self::json_catalog_path(&catalog.path, &catalog.uri, &catalog.language)
+        let provider_only = catalog.language.as_str() == "php";
+        if provider_only {
+            let docs = self.docs.lock();
+            if !provider_sync::supported(&target.caps())
+                || docs.values().any(|doc| Self::json_catalog_path(&doc.path, &doc.uri, &doc.language))
+                || !docs.get(&key.doc).is_some_and(|doc| {
+                    doc.servers.iter().any(|attached| {
+                        attached.resource.is_none()
+                            && attached.server.id == key.server
+                            && attached.opened_gen == Some(key.generation)
+                    })
+                })
+            {
+                return Ok(true);
+            }
+        } else if !Self::json_catalog_path(&catalog.path, &catalog.uri, &catalog.language)
             || !self.registered_json_candidate(&catalog)
         {
             return Ok(true);
         }
         let sources = {
             let docs = self.docs.lock();
-            if docs.get(&key.doc).is_some_and(|doc| doc.servers.iter().any(|attached| attached.server.id == key.server))
+            if !provider_only
+                && docs
+                    .get(&key.doc)
+                    .is_some_and(|doc| doc.servers.iter().any(|attached| attached.server.id == key.server))
             {
                 return Ok(true);
             }
@@ -367,9 +428,13 @@ impl LspManager {
         if contexts.is_empty() {
             return Ok(true);
         }
+        if provider_only && contexts.len() != 1 {
+            return Ok(false);
+        }
+        let resource_path = if provider_only { catalog.path.with_extension("json") } else { catalog.path.clone() };
         let mut receipts = Vec::new();
         for (manifest, source) in &contexts {
-            receipts.push(self.json_resource_on_target(manifest, &catalog.path, source, &target, cancel).await?);
+            receipts.push(self.json_resource_on_target(manifest, &resource_path, source, &target, cancel).await?);
         }
         for receipt in &receipts {
             self.php_json_translation_resource_current(receipt, cancel.clone()).await?;
@@ -379,7 +444,7 @@ impl LspManager {
             .enumerate()
             .filter_map(|(index, receipt)| receipt.root.is_some().then_some(index))
             .collect();
-        if positive.is_empty() {
+        if provider_only || positive.is_empty() {
             for (path, manifest) in &manifests {
                 if self.json_resource_manifest(path, cancel).await? != *manifest {
                     return Err(IdeError::cancelled());
@@ -393,12 +458,12 @@ impl LspManager {
                 opened.append(&mut receipt.provider_sessions);
             }
             references::ResourceSession::retain_all(opened)?;
-            return Ok(false);
+            return Ok(provider_only);
         }
         let [selected] = positive.as_slice() else { return Ok(false) };
         let mut receipt = if contexts.len() > 1 {
             let (manifest, source) = &contexts[*selected];
-            self.json_resource_on_target(manifest, &catalog.path, source, &target, cancel).await?
+            self.json_resource_on_target(manifest, &resource_path, source, &target, cancel).await?
         } else {
             receipts.remove(*selected)
         };

@@ -15,6 +15,58 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Provider recovery without open catalogs slice 227 (2026-11-21; client/Host accepted):
+FEAT-031/066/067/068: declared provider buffers now recover in the background
+when no translation JSON document is open. A stable primary PHP document anchors
+one debounced recovery task per consuming server. PHP input changes discover
+eligible consumers, and retained dependency invalidation queues recovery before
+withdrawing the old provider copy. Restart uses the same discovery path. A fresh
+checked receipt still authorizes each forwarded file; metadata-only and legacy
+engines keep the no-catalog fast path without querying provider inventory.
+Recovery creates no probe file and invokes no PHP navigation command. It retains
+provider leases only after validating current documents, manifests, capabilities,
+execution permission and the preparation revision. Ambiguous multiple Composer
+contexts without a catalog selector remain unaccepted rather than choosing one.
+
+The protocol regression first fails on an unsaved provider edit: its consumer
+never receives the replacement without a second PHP action. The extended real
+fixture independently times out waiting for class-withdrawal publication. Both
+pass after the fix. Protocol checks cover edit, rapid restore, first provider
+open, restart and execution revocation without any open JSON buffer; unrelated
+PHP buffers stay private. All 98 JSON protocol regressions pass. The real
+separate-server trace observes provider withdrawal and restoration before the
+next hover, including correct disk-backed translation behavior afterward. Disk
+PHP/JSON remain unchanged, no synthetic Caller.json is created, and all three
+owned engine processes exit. All 75 real client and 62 Host cases pass against
+signed inactive engine 191; query-only 187 remains rejected. Engine source,
+candidate pins and binaries are unchanged, so prior engine-only acceptance is
+reused rather than reported as newly run.
+
+Fresh gates pass: Rust 5,631 / 263 ignored / the same 11 documented exclusions;
+all-target workspace Clippy with warnings denied; formatting; bindings fidelity;
+default-engine provenance; frontend 14,603 / eight skipped;
+types/lint/format/Knip; production build/Safari compatibility; 59 browser cases.
+Temporary workspace tests use stripped symbols and no debug info to limit disk
+usage; the retained Cargo fingerprints record that profile.
+No performance parity is claimed. Native GUI checks remain user-skipped;
+sole signed App 119/default engine 185 remain unchanged and no app is promoted.
+
+Latest regression executables replace 877,505,888 bytes
+of older test payload. Removed 10028 files, 16.7GiB total. Frontend dist is removed. All six
+retained test executables launch after cleanup. Earlier source, provenance and
+evaluation assets and both stashes remain. The FEAT-031 inventory now links accepted client support through 227 and removes
+its obsolete 208-era client-adoption prerequisite. All 69 areas remain visible at
+67 partial/two user-deferred. Normal commit/push and remote read-back are
+recorded in the ignored receipt.
+
+Remaining: broader provider graphs and multiple consumer contexts in one server;
+new unsaved provider files without disk identity; wider physical/service matrices,
+concurrent foreground requests, performance measurements, promotion and native
+acceptance. Editor aliases still intentionally refuse synchronization. Evidence:
+artifacts/checks/slice227/{gates,frontend-gates,evaluation,frozen-runtimes,
+retention,retained-runtime-lists,real-red}.json plus the red/green logs and
+content-free provider event trace.
+
 Declared provider buffer synchronization slice 226 (2026-11-21; client/Host accepted; candidate 191 inactive):
 FEAT-031/066/067/068: ordinary PHP navigation now shares only managed physical
 provider files named by the selected consumer's checked source receipts. A

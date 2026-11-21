@@ -15,6 +15,7 @@ struct ProviderFixture {
     provider: DocId,
     path: PathBuf,
     original: PathBuf,
+    original_doc: DocId,
     alternate: PathBuf,
     alternate_doc: DocId,
     unrelated: PathBuf,
@@ -64,7 +65,8 @@ impl ProviderFixture {
                 _ => None,
             }
         }));
-        h.mgr.did_open(DocId::next(), &original, &LanguageId::new("json"), 1, r#"{"Greeting":"private original"}"#);
+        let original_doc = DocId::next();
+        h.mgr.did_open(original_doc, &original, &LanguageId::new("json"), 1, r#"{"Greeting":"private original"}"#);
         let alternate_doc = DocId::next();
         h.mgr.did_open(alternate_doc, &alternate, &LanguageId::new("json"), 1, r#"{"Greeting":"private alternate"}"#);
         let provider = DocId::next();
@@ -73,7 +75,7 @@ impl ProviderFixture {
         }
         let (caller, _) = h.open("app/Caller.php", CALLER);
         let (_, unrelated) = h.open("shared/Private.php", "<?php /* unrelated private buffer */");
-        Self { h, target, start, caller, provider, path, original, alternate, alternate_doc, unrelated }
+        Self { h, target, start, caller, provider, path, original, original_doc, alternate, alternate_doc, unrelated }
     }
 
     async fn hover(&self) -> String {
@@ -334,4 +336,72 @@ async fn json_provider_sync_keeps_metadata_only_engines_content_free() {
     assert!(!f.target.docs.lock().contains_key(&uri_of(&f.path)));
     assert!(!f.target.docs.lock().contains_key(&uri_of(&f.unrelated)));
     f.h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_provider_sync_recovers_without_open_catalogs_or_another_php_action() {
+    for action in ["edit", "restore", "restart", "open", "disable"] {
+        println!("provider recovery without catalogs: {action}");
+        let f = ProviderFixture::new(true, action != "open");
+        f.h.mgr.did_close(f.original_doc);
+        f.h.mgr.did_close(f.alternate_doc);
+        assert_eq!(f.hover().await, "disk");
+        assert_eq!(f.target.docs.lock().get(&uri_of(&f.path)).cloned(), (action != "open").then(|| DIRTY.into()));
+        let change = |old: &str, new: &str, version| {
+            f.h.mgr.did_change(
+                f.provider,
+                version,
+                &[AppliedChange { range: rng(0, 0, 0, old.encode_utf16().count() as u32), text: new.into() }],
+                &|| new.into(),
+            )
+        };
+        match action {
+            "edit" => change(DIRTY, PROVIDER, 2),
+            "restore" => {
+                change(DIRTY, PROVIDER, 2);
+                change(PROVIDER, DIRTY, 3);
+            }
+            "restart" => {
+                let id = f.h.mgr.servers().iter().find(|s| *s.root == f.h.root.join("app")).unwrap().id;
+                f.h.mgr.restart(id).await.unwrap();
+            }
+            "open" => {
+                f.h.mgr.did_open(f.provider, &f.path, &f.h.lang, 2, DIRTY);
+            }
+            "disable" => f.h.mgr.set_execution_allowed(false),
+            _ => unreachable!(),
+        }
+        let expected =
+            if action == "disable" { None } else { Some(if action == "edit" { PROVIDER } else { DIRTY }.to_owned()) };
+        eventually(|| f.target.docs.lock().get(&uri_of(&f.path)).cloned() == expected).await;
+        assert!(!f.target.docs.lock().contains_key(&uri_of(&f.original)));
+        assert!(!f.target.docs.lock().contains_key(&uri_of(&f.alternate)));
+        assert!(!f.target.docs.lock().contains_key(&uri_of(&f.unrelated)));
+        assert_eq!(
+            f.target.requested("textDocument/hover").len(),
+            1,
+            "background recovery must not invoke PHP navigation"
+        );
+        assert!(!f.h.root.join("app/Caller.json").exists());
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), PROVIDER);
+        f.h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_provider_sync_without_catalogs_preserves_legacy_and_metadata_only_boundaries() {
+    for metadata_only in [true, false] {
+        let f = ProviderFixture::new(metadata_only, true);
+        f.target.caps.lock()["experimental"]["phpWorkbenchProviderSourceSync"] = json!(false);
+        f.h.mgr.did_close(f.original_doc);
+        f.h.mgr.did_close(f.alternate_doc);
+        assert_eq!(f.hover().await, "disk");
+        assert!(!f.target.docs.lock().contains_key(&uri_of(&f.path)));
+        assert!(!f.target.docs.lock().contains_key(&uri_of(&f.unrelated)));
+        assert!(
+            f.target.requested(METHOD).is_empty(),
+            "legacy no-catalog navigation must not query provider inventory"
+        );
+        f.h.mgr.shutdown_all().await;
+    }
 }

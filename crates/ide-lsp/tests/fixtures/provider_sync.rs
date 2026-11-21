@@ -244,7 +244,27 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
         );
         let removed = "<?php namespace Shared; class Other {}";
         syntax_text(&php, removed);
+        let hover_count = events(&control)
+            .iter()
+            .filter(|event| event_at(event, &app, "textDocument/hover", &app.join("src/Caller.php")))
+            .count();
         replace(&mgr, provider, 5, &dirty, removed);
+        until_events(&control, |log| {
+            log.iter().any(|event| {
+                event_at(event, &app, "textDocument/didOpen", &source)
+                    && event["version"] == 5
+                    && event["sha256"] == format!("{:x}", Sha256::digest(removed.as_bytes()))
+            })
+        })
+        .await;
+        assert_eq!(
+            events(&control)
+                .iter()
+                .filter(|event| event_at(event, &app, "textDocument/hover", &app.join("src/Caller.php")))
+                .count(),
+            hover_count,
+            "provider withdrawal must refresh before another PHP action with no open catalogs"
+        );
         let hover = mgr
             .hover(caller, pos(CALLER, "Greeting 😀"), Default::default())
             .await
@@ -256,6 +276,14 @@ async fn ordinary_php_navigation_uses_declared_foreign_provider_buffers_and_reco
             "removing a provider declaration must withdraw its disk registration: {hover}"
         );
         replace(&mgr, provider, 6, removed, &dirty);
+        until_events(&control, |log| {
+            log.iter().any(|event| {
+                event_at(event, &app, "textDocument/didOpen", &source)
+                    && event["version"] == 6
+                    && event["sha256"] == format!("{:x}", Sha256::digest(dirty.as_bytes()))
+            })
+        })
+        .await;
         assert!(
             mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default())
                 .await

@@ -1,0 +1,352 @@
+--- a/src/workbench_translation_resources.rs
++++ b/src/workbench_translation_resources.rs
+@@ -1,4 +1,5 @@
+ //! Content-free admission for a JSON translation overlay.
++use sha2::{Digest, Sha256};
+ use std::path::PathBuf;
+ 
+ use crate::{Backend, project_router::ProjectRouter};
+@@ -14,6 +15,47 @@
+ pub const CAPABILITY: &str = "phpWorkbenchJsonTranslationResource";
+ /// Registered JSON buffers share data with their consuming graph.
+ pub const BUFFER_CAPABILITY: &str = "phpWorkbenchRegisteredJsonTranslations";
++/// Replies include bounded locations and current source digests for known providers.
++pub const PROVIDER_SOURCES_CAPABILITY: &str = "phpWorkbenchProviderSources";
++const MAX_PROVIDERS: usize = 512;
++const MAX_PROVIDER_BYTES: u64 = 1024 * 1024;
++const MAX_PROVIDER_TOTAL_BYTES: usize = 8 * 1024 * 1024;
++
++/// A statically resolved provider location; no source text is returned.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ProviderSource {
++    /// Statically named provider class.
++    pub class_name: String,
++    /// Preferred physical location of its source file.
++    pub uri: Url,
++    /// Lowercase SHA-256 of the current UTF-8 source held by this backend.
++    pub sha256: String,
++}
++
++/// Known providers only, not a complete runtime dependency graph.
++#[derive(Clone, Debug, Default, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ProviderSources {
++    /// Resolved classes, in registration order.
++    pub providers: Vec<ProviderSource>,
++    /// Named classes whose bounded physical sources could not be resolved.
++    pub unresolved: Vec<String>,
++    /// A count, name, or hashing budget prevented a full static inventory.
++    pub limited: bool,
++}
++
++fn bounded_provider_name(name: &str) -> bool {
++    !name.is_empty()
++        && name.len() <= 4096
++        && name.split('\\').all(|part| {
++            !part.is_empty()
++                && !part.as_bytes()[0].is_ascii_digit()
++                && part
++                    .bytes()
++                    .all(|byte| byte >= 0x80 || byte.is_ascii_alphanumeric() || byte == b'_')
++        })
++}
+ 
+ /// The consuming PHP project and a proposed JSON locale file.
+ #[derive(Clone, Debug, Deserialize, Serialize)]
+@@ -35,6 +77,9 @@
+     pub resource_uri: Url,
+     /// Direct JSON locale directory, or null when not statically registered.
+     pub root_uri: Option<Url>,
++    /// Bounded static provider locations and source digests, including negative roots.
++    #[serde(default)]
++    pub provider_sources: ProviderSources,
+ }
+ 
+ fn local_path(uri: &Url) -> Result<PathBuf> {
+@@ -154,6 +199,73 @@
+ }
+ 
+ impl Backend {
++    fn known_provider_sources(&self) -> ProviderSources {
++        let mut result = ProviderSources::default();
++        if !self.resolved_class_cache.read().is_laravel() {
++            return result;
++        }
++        let providers = self.laravel_providers();
++        let mut seen = std::collections::HashSet::new();
++        let mut hashes = std::collections::HashMap::<Url, String>::new();
++        let mut bytes = 0usize;
++        for (index, fqn) in providers.fqns().enumerate() {
++            if index >= MAX_PROVIDERS {
++                result.limited = true;
++                break;
++            }
++            if !seen.insert(fqn.to_ascii_lowercase()) {
++                continue;
++            }
++            if !bounded_provider_name(fqn) {
++                result.limited = true;
++                continue;
++            }
++            let resolved = (|| {
++                let original = self.resolve_class_uri(fqn)?;
++                let path = Url::parse(&original)
++                    .ok()?
++                    .to_file_path()
++                    .ok()?
++                    .canonicalize()
++                    .ok()?;
++                let metadata = std::fs::metadata(&path).ok()?;
++                if !metadata.is_file() || metadata.len() > MAX_PROVIDER_BYTES {
++                    return None;
++                }
++                let uri = Url::from_file_path(path).ok()?;
++                if uri.as_str().len() > 16_384 {
++                    return None;
++                }
++                let sha256 = if let Some(hash) = hashes.get(&uri) {
++                    hash.clone()
++                } else {
++                    let content = self.get_file_content(&original)?;
++                    if content.len() as u64 > MAX_PROVIDER_BYTES
++                        || bytes.saturating_add(content.len()) > MAX_PROVIDER_TOTAL_BYTES
++                    {
++                        result.limited = true;
++                        return None;
++                    }
++                    bytes += content.len();
++                    let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
++                    hashes.insert(uri.clone(), hash.clone());
++                    hash
++                };
++                Some(ProviderSource {
++                    class_name: fqn.to_owned(),
++                    uri,
++                    sha256,
++                })
++            })();
++            if let Some(source) = resolved {
++                result.providers.push(source);
++            } else {
++                result.unresolved.push(fqn.to_owned());
++            }
++        }
++        result
++    }
++
+     /// Classify only current static registrations, without running framework code.
+     pub async fn workbench_json_translation_resource(
+         &self,
+@@ -178,6 +290,7 @@
+                     project_uri: query.project_uri.clone(),
+                     resource_uri: query.resource_uri.clone(),
+                     root_uri,
++                    provider_sources: backend.known_provider_sources(),
+                 })
+             })
+         })
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -298,7 +298,7 @@
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, (crate::workbench_translation_resources::CAPABILITY): true, (crate::workbench_translation_resources::BUFFER_CAPABILITY): true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, (crate::workbench_translation_resources::CAPABILITY): true, (crate::workbench_translation_resources::BUFFER_CAPABILITY): true, (crate::workbench_translation_resources::PROVIDER_SOURCES_CAPABILITY): true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+--- /dev/null
++++ b/tests/provider_source_receipts.rs
+@@ -0,0 +1,190 @@
++use phpantom_lsp::{ProjectRouter, workbench_translation_resources::TranslationResourceQuery};
++use sha2::{Digest, Sha256};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const PROVIDER: &str = "<?php namespace Shared; class Provider {public function boot(): void {$this->loadJsonTranslationsFrom(__DIR__.'/../json');}}";
++
++#[tokio::test]
++async fn provider_sources_identify_external_registered_code_without_sending_contents() {
++    let temp = tempfile::tempdir().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    let app = root.join("app");
++    let provider = root.join("shared/src/Provider.php");
++    for (path, text) in [
++        (
++            app.join("composer.json"),
++            r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"Shared\\":"../shared/src/"}}}"#,
++        ),
++        (
++            app.join("bootstrap/providers.php"),
++            "<?php return [Shared\\Provider::class, Missing\\Provider::class];",
++        ),
++        (provider.clone(), PROVIDER),
++    ] {
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(path, text).unwrap();
++    }
++    let router = ProjectRouter::new_test();
++    let init = router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&app).unwrap()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: Url::from_directory_path(&app).unwrap(),
++                name: "consumer".into(),
++            }]),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let project = Url::from_file_path(app.join("composer.json")).unwrap();
++    let resource = Url::from_file_path(root.join("shared/json/fr.json")).unwrap();
++    let reply = router
++        .workbench_json_translation_resource(TranslationResourceQuery {
++            project_uri: project.clone(),
++            resource_uri: resource.clone(),
++        })
++        .await
++        .unwrap();
++    assert!(reply.root_uri.is_some());
++    let value = serde_json::to_value(&reply).unwrap();
++    let sources = value["providerSources"]["providers"]
++        .as_array()
++        .expect("provider-source metadata is required");
++    assert_eq!(sources.len(), 1);
++    assert_eq!(sources[0]["className"], "Shared\\Provider");
++    assert_eq!(
++        sources[0]["uri"],
++        Url::from_file_path(&provider).unwrap().as_str()
++    );
++    assert_eq!(
++        sources[0]["sha256"],
++        format!("{:x}", Sha256::digest(PROVIDER.as_bytes()))
++    );
++    assert!(sources[0].get("text").is_none());
++    assert_eq!(
++        value["providerSources"]["unresolved"],
++        serde_json::json!(["Missing\\Provider"])
++    );
++    assert_eq!(value["providerSources"]["limited"], false);
++    assert_eq!(
++        init.capabilities.experimental.unwrap()["phpWorkbenchProviderSources"],
++        true
++    );
++    let dirty = PROVIDER.replace("../json", "../alternate");
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::from_file_path(&provider).unwrap(),
++                language_id: "php".into(),
++                version: 1,
++                text: dirty.clone(),
++            },
++        })
++        .await;
++    let negative = router
++        .workbench_json_translation_resource(TranslationResourceQuery {
++            project_uri: project.clone(),
++            resource_uri: resource.clone(),
++        })
++        .await
++        .unwrap();
++    assert!(negative.root_uri.is_none());
++    let negative = serde_json::to_value(negative).unwrap();
++    assert_eq!(
++        negative["providerSources"]["providers"][0]["sha256"],
++        format!("{:x}", Sha256::digest(dirty.as_bytes()))
++    );
++    assert_eq!(std::fs::read_to_string(&provider).unwrap(), PROVIDER);
++    assert!(!resource.to_file_path().unwrap().exists());
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn provider_sources_bound_known_names_and_report_truncation_for_negative_resources() {
++    let temp = tempfile::tempdir().unwrap();
++    let app = temp.path().canonicalize().unwrap();
++    std::fs::create_dir(app.join("bootstrap")).unwrap();
++    std::fs::write(
++        app.join("composer.json"),
++        r#"{"require":{"laravel/framework":"^13.0"}}"#,
++    )
++    .unwrap();
++    let names = (0..513)
++        .map(|i| format!("Missing\\Provider{i}::class"))
++        .collect::<Vec<_>>()
++        .join(",");
++    std::fs::write(
++        app.join("bootstrap/providers.php"),
++        format!("<?php return [{names}];"),
++    )
++    .unwrap();
++    let router = ProjectRouter::new_test();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&app).unwrap()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let reply = router
++        .workbench_json_translation_resource(TranslationResourceQuery {
++            project_uri: Url::from_file_path(app.join("composer.json")).unwrap(),
++            resource_uri: Url::from_file_path(app.join("absent/fr.json")).unwrap(),
++        })
++        .await
++        .unwrap();
++    assert!(reply.root_uri.is_none());
++    assert!(reply.provider_sources.providers.is_empty());
++    assert_eq!(reply.provider_sources.unresolved.len(), 512);
++    assert!(reply.provider_sources.limited);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn provider_sources_bound_unique_source_hashing_without_requiring_json_registrations() {
++    let temp = tempfile::tempdir().unwrap();
++    let app = temp.path().canonicalize().unwrap();
++    std::fs::create_dir(app.join("bootstrap")).unwrap();
++    std::fs::create_dir(app.join("src")).unwrap();
++    std::fs::write(
++        app.join("composer.json"),
++        r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    )
++    .unwrap();
++    let mut names = Vec::new();
++    for i in 0..9 {
++        let mut text = format!("<?php namespace App; class Provider{i} {{}} /*");
++        text.extend(std::iter::repeat_n('x', 1_048_576 - text.len() - 2));
++        text.push_str("*/");
++        std::fs::write(app.join(format!("src/Provider{i}.php")), text).unwrap();
++        names.push(format!("App\\Provider{i}::class"));
++    }
++    std::fs::write(
++        app.join("bootstrap/providers.php"),
++        format!("<?php return [{}];", names.join(",")),
++    )
++    .unwrap();
++    let router = ProjectRouter::new_test();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&app).unwrap()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let reply = router
++        .workbench_json_translation_resource(TranslationResourceQuery {
++            project_uri: Url::from_file_path(app.join("composer.json")).unwrap(),
++            resource_uri: Url::from_file_path(app.join("absent/fr.json")).unwrap(),
++        })
++        .await
++        .unwrap();
++    assert!(reply.root_uri.is_none());
++    assert_eq!(reply.provider_sources.providers.len(), 8);
++    assert_eq!(reply.provider_sources.unresolved.len(), 1);
++    assert!(reply.provider_sources.limited);
++    router.shutdown().await.unwrap();
++}

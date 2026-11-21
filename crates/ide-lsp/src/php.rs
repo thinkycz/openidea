@@ -1,8 +1,8 @@
 //! Typed PHPantom extensions. Receipts refer to the exact UTF-8 overlay sent
 //! to this engine generation, including unsaved dependencies.
 mod resources;
-pub use resources::PhpJsonTranslationResource;
 pub(crate) use resources::{JsonRefreshKey, JsonResourceWitness};
+pub use resources::{PhpJsonTranslationResource, PhpProviderSource, PhpProviderSources};
 
 use super::*;
 use serde::{Deserialize, Serialize};

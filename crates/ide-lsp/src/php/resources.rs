@@ -1,5 +1,7 @@
 use super::*;
 mod composer;
+mod providers;
+pub use providers::{PhpProviderSource, PhpProviderSources};
 mod references;
 mod refresh;
 pub(crate) use refresh::JsonRefreshKey;
@@ -12,6 +14,7 @@ pub struct PhpJsonTranslationResource {
     project: PathBuf,
     resource: PathBuf,
     root: Option<PathBuf>,
+    provider_sources: Option<PhpProviderSources>,
     target: Target,
     sources: NavigationSnapshot,
     composer: Option<Arc<ComposerInputs>>,
@@ -51,6 +54,11 @@ impl PhpJsonTranslationResource {
     pub fn root_path(&self) -> Option<&Path> {
         self.root.as_deref()
     }
+
+    /// Static locations and server-held digests; this does not authorize forwarding buffers.
+    pub fn provider_sources(&self) -> Option<&PhpProviderSources> {
+        self.provider_sources.as_ref()
+    }
 }
 
 #[derive(Serialize)]
@@ -67,6 +75,8 @@ struct ResourceReply {
     resource_uri: String,
     #[serde(deserialize_with = "Deserialize::deserialize")]
     root_uri: Option<String>,
+    #[serde(default)]
+    provider_sources: Option<Value>,
 }
 
 fn supports_resources(caps: &ServerCaps) -> bool {
@@ -181,6 +191,7 @@ impl LspManager {
             project: snap.path,
             resource: resource.to_owned(),
             root: None,
+            provider_sources: None,
             target,
             sources,
             composer: None,
@@ -193,6 +204,8 @@ impl LspManager {
         mut receipt: PhpJsonTranslationResource,
         cancel: CancellationToken,
     ) -> IdeResult<PhpJsonTranslationResource> {
+        let inputs = self.json_input_snapshot();
+        let provider_capability = providers::supported(&receipt.target.caps());
         let params = ResourceQuery {
             project_uri: uri::path_to_uri(&receipt.project),
             resource_uri: uri::path_to_uri(&receipt.resource),
@@ -241,6 +254,18 @@ impl LspManager {
             None
         };
         receipt.root = root;
+        if providers::supported(&receipt.target.caps()) != provider_capability {
+            return Err(IdeError::new(ErrorKind::OutOfSync, "Provider source capabilities changed"));
+        }
+        if provider_capability {
+            let value = reply
+                .provider_sources
+                .ok_or_else(|| IdeError::invalid("Missing advertised provider source metadata"))?;
+            receipt.provider_sources = Some(self.read_provider_sources(&receipt, value, &cancel).await?);
+            if *self.json_preparation_changed.borrow() != inputs.revision {
+                return Err(IdeError::new(ErrorKind::OutOfSync, "Managed inputs changed during provider lookup"));
+            }
+        }
         self.php_json_translation_resource_current(&receipt, cancel).await?;
         Ok(receipt)
     }
@@ -268,6 +293,9 @@ impl LspManager {
             return Err(IdeError::cancelled());
         }
         authority.map_err(|_| IdeError::new(ErrorKind::OutOfSync, "JSON resource file authority changed"))?;
+        if let Some(providers) = &receipt.provider_sources {
+            self.provider_sources_current(receipt, providers, &cancel).await?;
+        }
         self.laravel_query_current(&receipt.target, &receipt.sources)
     }
 }

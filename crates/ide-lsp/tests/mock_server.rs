@@ -195,12 +195,30 @@ impl Handler for MockHandler {
 #[derive(Default)]
 struct MockLauncher {
     servers: Mutex<HashMap<String, Arc<MockState>>>,
+    scoped: Mutex<HashMap<(String, PathBuf), Arc<MockState>>>,
     connections: Mutex<Vec<Arc<MockConnection>>>,
 }
 
 impl MockLauncher {
     fn state(&self, name: &str) -> Arc<MockState> {
         self.servers.lock().entry(name.to_owned()).or_default().clone()
+    }
+
+    fn state_for_root(&self, name: &str, root: &Path) -> Arc<MockState> {
+        let caps = self.state(name).caps.lock().clone();
+        self.scoped
+            .lock()
+            .entry((name.to_owned(), root.to_owned()))
+            .or_insert_with(|| {
+                let state = Arc::new(MockState::default());
+                *state.caps.lock() = caps;
+                state
+            })
+            .clone()
+    }
+
+    fn launch_state(&self, name: &str, root: &Path) -> Arc<MockState> {
+        self.scoped.lock().get(&(name.to_owned(), root.to_owned())).cloned().unwrap_or_else(|| self.state(name))
     }
 }
 
@@ -214,17 +232,17 @@ impl Launcher for MockLauncher {
         cancel: &ide_core::CancellationToken,
     ) -> Result<(Peer, Option<PathBuf>), LaunchError> {
         self.launch_cancellable(config, root, handler, on_stderr, cancel)
-            .map(|peer| (peer, self.state(&config.name).binary.lock().clone()))
+            .map(|peer| (peer, self.launch_state(&config.name, root).binary.lock().clone()))
     }
 
     fn launch(
         &self,
         config: &LanguageServerConfig,
-        _root: &Path,
+        root: &Path,
         handler: Arc<dyn Handler>,
         _on_stderr: Box<dyn Fn(String) + Send + Sync>,
     ) -> Result<Peer, LaunchError> {
-        let state = self.state(&config.name);
+        let state = self.launch_state(&config.name, root);
         if state.missing.load(Ordering::SeqCst) {
             return Err(LaunchError::Missing);
         }

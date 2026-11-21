@@ -17,6 +17,56 @@ pub(super) fn echo(params: &Value, root: Option<&Path>) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_provider_source_receipts_are_capability_gated_and_content_free() {
+    use sha2::Digest;
+    let content = "<?php /* closed provider */";
+    let hash = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+    for advertised in [true, false] {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchProviderSources"] = json!(advertised);
+        let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+        let (caller, _) = h.open("Caller.php", "<?php");
+        let provider = h.root.join("Provider.php");
+        std::fs::write(&provider, content).unwrap();
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let catalog = h.root.join("catalogs/en.json");
+        let resource = catalog.clone();
+        let source = provider.clone();
+        let source_hash = hash.clone();
+        h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, params| {
+            (method == METHOD).then(|| {
+                let mut reply = echo(params, None);
+                reply["providerSources"] = json!({"providers":[{"className":"App\\Provider","uri":uri_of(&source),"sha256":source_hash}],"unresolved":["Missing\\Provider"],"limited":false});
+                if !advertised { reply["providerSources"] = json!("unadvertised malformed metadata is ignored"); }
+                assert_eq!(params["resourceUri"], uri_of(&resource));
+                reply
+            })
+        }));
+        let receipt = h.mgr.php_json_translation_resource(caller, &catalog, Default::default()).await.unwrap();
+        if advertised {
+            let providers = receipt.provider_sources().expect("advertised provider-source metadata must be retained");
+            assert_eq!(providers.providers.len(), 1);
+            assert_eq!(providers.providers[0].class_name, "App\\Provider");
+            assert_eq!(providers.providers[0].path, provider);
+            assert_eq!(providers.providers[0].sha256_utf8, <[u8; 32]>::from(sha2::Sha256::digest(content.as_bytes())));
+            assert_eq!(providers.unresolved, ["Missing\\Provider"]);
+            assert!(providers.incomplete());
+        } else {
+            assert!(receipt.provider_sources().is_none());
+        }
+        assert!(!catalog.exists());
+        assert!(
+            h.launcher
+                .state("phpantom")
+                .notified("textDocument/didOpen")
+                .iter()
+                .all(|event| event["textDocument"]["uri"] != uri_of(&catalog))
+        );
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn laravel_json_composer_admits_without_opening_php_or_sharing_catalog_buffers() {
     let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
     let manifest = h.root.join("composer.json");
@@ -429,4 +479,255 @@ async fn laravel_json_resource_does_not_retry_after_execution_is_disabled() {
     assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::OutOfSync);
     assert_eq!(state.requested(METHOD).len(), 1);
     h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_provider_source_receipts_reject_invalid_or_contradictory_metadata() {
+    use sha2::Digest;
+    for variant in [
+        "missing",
+        "null",
+        "array",
+        "text",
+        "bad digest",
+        "uppercase digest",
+        "short digest",
+        "digest mismatch",
+        "invalid name",
+        "duplicate name",
+        "conflicting file",
+        "unresolved collision",
+        "too many",
+        "fragment",
+        "remote",
+        "directory",
+        "missing file",
+        "oversized file",
+    ] {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchProviderSources"] = json!(true);
+        let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+        let (caller, _) = h.open("Caller.php", "<?php");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let provider = h.root.join("Provider.php");
+        let text = "<?php /* source */";
+        std::fs::write(&provider, text).unwrap();
+        let entry = json!({"className":"App\\Provider","uri":uri_of(&provider),"sha256":format!("{:x}",sha2::Sha256::digest(text.as_bytes()))});
+        let mut data = json!({"providers":[entry.clone()],"unresolved":[],"limited":false});
+        match variant {
+            "missing" | "null" => data = Value::Null,
+            "array" => data = json!([]),
+            "text" => data["providers"][0]["text"] = json!(text),
+            "bad digest" => data["providers"][0]["sha256"] = json!("gg".repeat(32)),
+            "uppercase digest" => data["providers"][0]["sha256"] = json!("AB".repeat(32)),
+            "short digest" => data["providers"][0]["sha256"] = json!("ab"),
+            "digest mismatch" => data["providers"][0]["sha256"] = json!("ab".repeat(32)),
+            "invalid name" => data["providers"][0]["className"] = json!("App\\"),
+            "duplicate name" => {
+                let mut duplicate = entry.clone();
+                duplicate["className"] = json!("app\\provider");
+                data["providers"].as_array_mut().unwrap().push(duplicate);
+            }
+            "conflicting file" => {
+                let mut duplicate = entry.clone();
+                duplicate["className"] = json!("App\\Other");
+                duplicate["sha256"] = json!("ab".repeat(32));
+                data["providers"].as_array_mut().unwrap().push(duplicate);
+            }
+            "unresolved collision" => data["unresolved"] = json!(["App\\Provider"]),
+            "too many" => data["providers"] = json!(vec![entry.clone(); 513]),
+            "fragment" => data["providers"][0]["uri"] = json!(format!("{}#part", uri_of(&provider))),
+            "remote" => data["providers"][0]["uri"] = json!("https://example.invalid/Provider.php"),
+            "directory" => data["providers"][0]["uri"] = json!(uri_of(&h.root)),
+            "missing file" => {
+                std::fs::remove_file(&provider).unwrap();
+            }
+            "oversized file" => {
+                std::fs::write(&provider, "x".repeat(1_048_577)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |_, method, params| {
+            (method == METHOD).then(|| {
+                let mut reply = echo(params, None);
+                if variant != "missing" {
+                    reply["providerSources"] = data.clone();
+                }
+                reply
+            })
+        }));
+        assert!(
+            h.mgr
+                .php_json_translation_resource(caller, &h.root.join("json/en.json"), Default::default())
+                .await
+                .is_err(),
+            "{variant}"
+        );
+        assert_eq!(state.notified("textDocument/didOpen").len(), 1, "metadata must not open provider or JSON buffers");
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_provider_source_receipts_track_foreign_buffers_and_disk_revisions() {
+    use sha2::Digest;
+    for action in ["edit", "restore", "close", "open", "disk", "disk ABA", "replace", "cancel", "restart", "disable"] {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchProviderSources"] = json!(true);
+        let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+        let app = h.root.join("app");
+        let dependency = h.root.join("dependency");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::create_dir(&dependency).unwrap();
+        h.mgr.set_content_roots(vec![app.clone(), dependency.clone()]);
+        let target = h.launcher.state_for_root("phpantom", &app);
+        let foreign = h.launcher.state_for_root("phpantom", &dependency);
+        let provider = dependency.join("Provider.php");
+        let text = "<?php /* disk and initial buffer */";
+        let dirty = "<?php /* changed foreign buffer */";
+        std::fs::write(&provider, text).unwrap();
+        let (caller, _) = h.open("app/Caller.php", "<?php");
+        let doc = DocId::next();
+        if action != "open" {
+            h.mgr.did_open(doc, &provider, &h.lang, 1, text);
+        }
+        eventually(|| {
+            target.requested("initialize").len() == 1
+                && target.docs.lock().contains_key(&uri_of(&app.join("Caller.php")))
+        })
+        .await;
+        let source = provider.clone();
+        target.responder.lock().replace(Arc::new(move |_,method,params| (method==METHOD).then(|| {
+            let mut reply=echo(params,None);
+            reply["providerSources"]=json!({"providers":[{"className":"Shared\\Provider","uri":uri_of(&source),"sha256":format!("{:x}",sha2::Sha256::digest(text.as_bytes()))}],"unresolved":[],"limited":false});reply
+        })));
+        let receipt = h
+            .mgr
+            .php_json_translation_resource(caller, &h.root.join("json/en.json"), Default::default())
+            .await
+            .unwrap();
+        h.mgr.php_json_translation_resource_current(&receipt, Default::default()).await.unwrap();
+        assert!(!receipt.provider_sources().unwrap().incomplete());
+        assert!(!target.docs.lock().contains_key(&uri_of(&provider)), "metadata never forwards foreign buffers");
+        match action {
+            "edit" | "restore" => {
+                h.mgr.did_change(
+                    doc,
+                    2,
+                    &[AppliedChange { range: rng(0, 0, 0, text.encode_utf16().count() as u32), text: dirty.into() }],
+                    &|| dirty.into(),
+                );
+                if action == "restore" {
+                    h.mgr.did_change(
+                        doc,
+                        3,
+                        &[AppliedChange {
+                            range: rng(0, 0, 0, dirty.encode_utf16().count() as u32),
+                            text: text.into(),
+                        }],
+                        &|| text.into(),
+                    );
+                }
+            }
+            "close" => h.mgr.did_close(doc),
+            "open" => h.mgr.did_open(doc, &provider, &h.lang, 1, text),
+            "disk" => std::fs::write(&provider, dirty).unwrap(),
+            "disk ABA" => {
+                std::fs::write(&provider, dirty).unwrap();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                std::fs::write(&provider, text).unwrap();
+            }
+            "replace" => {
+                let replacement = dependency.join("replacement.php");
+                std::fs::write(&replacement, text).unwrap();
+                std::fs::rename(replacement, &provider).unwrap();
+            }
+            "restart" => {
+                let id = h.mgr.servers().iter().find(|server| server.root == app).unwrap().id;
+                h.mgr.restart(id).await.unwrap();
+            }
+            "disable" => h.mgr.set_execution_allowed(false),
+            "cancel" => {}
+            _ => unreachable!(),
+        }
+        let cancel = CancellationToken::new();
+        if action == "cancel" {
+            cancel.cancel();
+        }
+        assert!(h.mgr.php_json_translation_resource_current(&receipt, cancel).await.is_err(), "{action}");
+        assert!(!target.docs.lock().contains_key(&uri_of(&provider)));
+        if !matches!(action, "close" | "disable" | "open") {
+            assert_eq!(foreign.launches.load(Ordering::SeqCst), 1);
+        }
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_provider_source_receipts_reject_foreign_buffer_changes_during_query() {
+    use sha2::Digest;
+    for action in ["edit", "restore", "close", "open"] {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchProviderSources"] = json!(true);
+        let h = harness_for("php", "php", &[("phpantom", capabilities)], &[]);
+        let app = h.root.join("app");
+        let dependency = h.root.join("dependency");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::create_dir(&dependency).unwrap();
+        h.mgr.set_content_roots(vec![app.clone(), dependency.clone()]);
+        let target = h.launcher.state_for_root("phpantom", &app);
+        h.launcher.state_for_root("phpantom", &dependency);
+        let provider = dependency.join("Provider.php");
+        let text = "<?php /* initial */";
+        let dirty = "<?php /* changed */";
+        std::fs::write(&provider, text).unwrap();
+        let (caller, _) = h.open("app/Caller.php", "<?php");
+        let doc = DocId::next();
+        if action != "open" {
+            h.mgr.did_open(doc, &provider, &h.lang, 1, text);
+        }
+        eventually(|| target.docs.lock().contains_key(&uri_of(&app.join("Caller.php")))).await;
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let source = provider.clone();
+        target.responder.lock().replace(Arc::new(move |_, method, params| {
+            (method == METHOD).then(|| {
+                held.hold();
+                let mut reply = echo(params, None);
+                reply["providerSources"] = json!({"providers":[{"className":"Shared\\Provider","uri":uri_of(&source),"sha256":format!("{:x}",sha2::Sha256::digest(text.as_bytes()))}],"unresolved":[],"limited":false});
+                reply
+            })
+        }));
+        let mgr = h.mgr.clone();
+        let catalog = h.root.join("json/en.json");
+        let pending =
+            tokio::spawn(async move { mgr.php_json_translation_resource(caller, &catalog, Default::default()).await });
+        eventually(|| gate.entered()).await;
+        match action {
+            "edit" | "restore" => {
+                h.mgr.did_change(
+                    doc,
+                    2,
+                    &[AppliedChange { range: rng(0, 0, 0, text.len() as u32), text: dirty.into() }],
+                    &|| dirty.into(),
+                );
+                if action == "restore" {
+                    h.mgr.did_change(
+                        doc,
+                        3,
+                        &[AppliedChange { range: rng(0, 0, 0, dirty.len() as u32), text: text.into() }],
+                        &|| text.into(),
+                    );
+                }
+            }
+            "close" => h.mgr.did_close(doc),
+            "open" => h.mgr.did_open(doc, &provider, &h.lang, 1, text),
+            _ => unreachable!(),
+        }
+        gate.open();
+        assert!(tokio::time::timeout(Duration::from_secs(3), pending).await.unwrap().unwrap().is_err(), "{action}");
+        assert!(!target.docs.lock().contains_key(&uri_of(&provider)));
+        h.mgr.shutdown_all().await;
+    }
 }

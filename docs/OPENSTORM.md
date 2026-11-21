@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Provider source receipt slice 225 (2026-11-21; client/Host accepted; candidate 190 inactive):
+FEAT-031/066/067/068: the JSON resource extension now advertises a separate
+provider-source capability. For statically known Laravel provider classes it
+returns canonical physical file URIs and SHA-256 digests of the source used by
+the selected server, retaining unresolved names and truncation information.
+This is a dependency receipt foundation: selective synchronization of unsaved
+provider buffers between separate PHP servers remains pending. No new UI,
+settings, implicit framework execution or foreign-buffer forwarding is added.
+The inventory is not an exhaustive runtime provider graph.
+
+The engine regression first fails on missing metadata. New real-engine tests
+cover an external Composer PSR-4 provider, its current unsaved source hash,
+negative resource decisions, unresolved names, the 512-name bound and the 8 MiB
+unique-source hashing budget (1 MiB per file). No source text is returned.
+The reproducible source recipe appends patch 0190 to the pinned upstream archive;
+all 18,747 engine tests pass / 17 ignored, release all-target Clippy passes with
+and without mem-audit, formatting and source fingerprint verification pass, and
+the Apple Silicon engine is built and locally signed. Engine 190 remains inactive.
+
+The typed client adapter checks the advertised capability and preserves partial
+metadata. It rejects invalid or contradictory names, paths and hashes, unsafe
+physical sources, oversized inventories and stale disk/buffer witnesses. Hashing
+runs off the async thread and observes cancellation. Managed source hashes come
+from the selected server's buffer snapshot; foreign provider buffers are tracked
+for freshness without being sent to that server. File identity, unreported disk
+changes, edit/restore, open/close, restart, cancellation and execution revocation
+retire receipts. A managed-input revision captured before the request also rejects
+foreign changes while a reply is held. Older engines ignore unadvertised metadata,
+including malformed extra fields. All 89 JSON protocol cases pass.
+
+A new actual-client fixture validates PHP syntax and Composer JSON, then verifies
+closed external provider metadata, an owned dirty provider's analyzed hash, stale
+foreign-buffer receipt rejection and unchanged disk bytes with two separate
+Composer servers. All 74 actual-client and 62 Host cases pass on signed inactive
+engine 190; query-only engine 187 is still rejected by the admission regression.
+These are source/client process checks, not packaged native UI acceptance.
+Default engine 185 and the sole signed App 119 remain unchanged. Native GUI checks
+stay user-skipped, and no application is promoted.
+
+Fresh workspace gates pass: Rust 5,622 / 262 ignored / the same 11 documented
+exclusions; all-target workspace Clippy with warnings denied; formatting; bindings
+fidelity; default-engine provenance; frontend 14,603 / eight skipped;
+types/lint/format/Knip; production build/Safari compatibility; 59 browser cases.
+Temporary dev/test builds disable debug information and strip test symbols for
+the disk budget. No performance parity is claimed.
+
+Latest regression executables replace 875,823,472 bytes of
+previous test payload. Removed 10028 files, 16.7GiB total. Frontend dist
+(73,745,139 bytes), engine compiler output and disposable
+source scratch are removed. All six retained test executables still launch after
+cleanup. Source/provenance/evaluation assets, both stashes and the sole app remain.
+All 69 areas remain visible at 67 partial/two user-deferred. Normal commit, push
+and remote read-back are recorded in the ignored acceptance receipt.
+
+Next: use these declared provider dependencies for selective cross-server buffer
+synchronization; verify unsaved registrations through ordinary PHP navigation.
+Wider dependency graphs, concurrent foreground requests, runtime-only providers,
+large-catalog measurements, engine promotion and native acceptance remain open.
+Evidence: artifacts/checks/slice225/{gates,frontend-gates,engine-gates,candidate190,
+evaluation,frozen-runtimes,retention,engine-retention,retained-runtime-lists}.json,
+engine-red.log, client-red.log, client-held-green.log and client-json.log.
+
 Find Usages catalog recovery slice 224 (2026-11-21; client/Host accepted; candidate 189 inactive):
 FEAT-031/066/067: project-wide Find Usages now resumes ordinary catalog discovery
 when it exits after canceling background discovery or retiring a retained JSON

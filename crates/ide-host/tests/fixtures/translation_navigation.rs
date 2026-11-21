@@ -536,6 +536,7 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
             r#"{"require":{"php":"^8.3","laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#.into(),
         ),
         ("app/Provider.php".into(), provider.into()),
+        ("app/SecondCaller.php".into(), "<?php namespace App; class SecondCaller {}".into()),
         ("bootstrap/providers.php".into(), "<?php return [App\\Provider::class];".into()),
         ("packages/billing/composer.json".into(), r#"{"name":"acme/billing"}"#.into()),
         ("packages/billing/json/en.json".into(), json.into()),
@@ -607,6 +608,20 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
         })
         .await
         .expect("current unsaved catalog must be admitted before the first PHP command");
+        let opens_before_attach = opens();
+        f.project.documents.open(&f.root.join("app/SecondCaller.php")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !frames()
+                .iter()
+                .filter(|event| event["method"] == "textDocument/didOpen")
+                .skip(opens_before_attach)
+                .any(|event| event["version"] == private_version)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("managed PHP attachment must re-admit the private catalog before another PHP command");
         let opens_before_navigation = opens();
         for _ in 0..2 {
             let hover = ide_host::ops::lsp::lsp_hover(

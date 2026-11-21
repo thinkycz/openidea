@@ -15,6 +15,65 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Running PHP consumer reconciliation slice 217 (2026-11-21; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: opening another PHP buffer on a running compatible PHPantom
+server now queues discovery for existing custom JSON catalogs. Opening PHP
+already retired stale resource sessions; this trigger restores only registrations
+proven against the current set of active PHP consumers, without requiring a
+navigation request or a server restart. Server readiness keeps the same trigger.
+
+Reconciliation uses the existing debounce, generation identity, cancellation,
+current buffer/source/Composer witnesses and unique-positive-context selection.
+It handles another buffer in the same consuming project, replacement of the
+last open PHP buffer and selection of a different consuming project on the same
+server. Every active context must finish before text is forwarded. Ambiguous or
+incomplete consumers keep the catalog unshared, with recovery when that consumer
+closes. Foreground PHP commands supersede held work; catalog close and execution
+disable cancel it. Optional PHP servers and unsupported capabilities receive no
+new protocol or extra launch.
+
+The new public regression reproduces loss of an admitted catalog after another
+PHP buffer opens. Its first attempt checked mock state before the queued close
+was processed; the corrected test waits for closure before observing failed
+readmission. Both failure logs remain. Three protocol groups cover the cases above,
+including held metadata responses, foreground priority, incomplete and ambiguous
+context recovery, server identity and launch counts. All 72 focused JSON cases
+pass. No request deadline is relaxed. The real-client fixture includes a linted,
+autoload-compatible second PHP class and requires a new catalog open frame after
+that buffer opens, before its first PHP navigation request. The managed Host
+case requires its current private catalog version on the wire after the same
+operation. Startup, restart, unsaved navigation, Unicode, provider edits,
+save/watcher refresh, references and close/reopen checks remain.
+
+Fresh workspace executables reject query-only engine 187 and pass all 72 client
+and 62 Host cases on signed inactive engine 188. Source, Cargo fingerprint and
+binary witnesses match; retained fixture originals remain unchanged. Gates pass:
+Rust 5,603 / 260 ignored / the same 11 documented exclusions; workspace all-target
+Clippy with warnings denied; Rust formatting; bindings fidelity; default-engine
+provenance; frontend 14,603 / eight skipped; types/lint/format/Knip; production
+build/Safari startup; 59 controlled-browser cases. Debug linking reports
+13 instances of the existing large-unwind-table warning class. The unchanged
+protocol recorder retains slice 215's deterministic overlapping-ID evidence with
+its source hash rechecked. Native GUI remains user-skipped; no engine or app is
+promoted, and source acceptance does not establish packaged-app behavior.
+
+The latest 134-case regression set replaces the previous
+1,275,957,712-byte payload. Cargo cleanup: Removed 19655 files, 27.4GiB total.
+Removed frontend dist (73,745,139 bytes). All six retained
+executables list their expected tests after build cleanup. The sole signed App
+119, default engine 185, engine provenance, historical receipts and both stashes
+remain preserved. Normal commit, push and remote read-back are tracked in the
+ignored acceptance receipt. All 69 areas remain at 67 partial/two user-deferred.
+
+Next: reconciliation after PHP edits, saves and closes once earlier tasks have
+finished; configuration/root changes without a new generation; wider nested or
+closed consumers, separate-server overlays and multiple-positive support before
+promotion/packaging. Discovery still uses active open PHP consumers. Large-catalog
+performance, wider physical/service matrices and native UI remain unverified.
+Evidence: artifacts/checks/slice217/{gates,frontend-gates,evaluation,
+focused-real-client,focused-real-host,frozen-runtimes,retention,
+retained-runtime-lists}.json, red.log and focused JSON logs.
+
 PHP readiness reconciliation slice 216 (2026-11-21; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: custom JSON catalogs that are already open now enter discovery
 when a compatible PHPantom generation becomes ready. The trigger runs after

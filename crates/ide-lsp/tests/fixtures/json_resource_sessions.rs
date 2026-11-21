@@ -229,6 +229,7 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         ("composer.json", COMPOSER),
         ("app/Caller.php", CALLER),
         ("app/Provider.php", PROVIDER),
+        ("app/SecondCaller.php", "<?php namespace App; class SecondCaller {}"),
         ("bootstrap/providers.php", "<?php return [App\\Provider::class];"),
         ("packages/billing/composer.json", r#"{"name":"acme/billing"}"#),
         ("packages/billing/json/en.json", CATALOG),
@@ -297,6 +298,21 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
         })
         .await
         .expect("already-open catalog must be admitted on PHP readiness before the first PHP request");
+        let second = DocId::next();
+        mgr.did_open(
+            second,
+            &root.join("app/SecondCaller.php"),
+            &LanguageId::new("php"),
+            1,
+            "<?php namespace App; class SecondCaller {}",
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count("textDocument/didOpen") != 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("another PHP buffer must re-admit the catalog before the first PHP request");
         for _ in 0..2 {
             let hover = mgr.hover(caller, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
             assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
@@ -305,12 +321,12 @@ async fn ordinary_php_navigation_automatically_reuses_unsaved_custom_catalogs_an
             assert_eq!(targets[0].path.to_path_buf(), catalog);
             assert_eq!(targets[0].range.start, pos(OVERLAY, "Greeting 😀"));
         }
-        assert_eq!(count("textDocument/didOpen"), 1, "unchanged PHP requests reuse one admitted overlay");
-        assert_eq!(count("textDocument/didClose"), 0, "retain the catalog after ordinary PHP navigation");
+        assert_eq!(count("textDocument/didOpen"), 2, "unchanged PHP requests reuse the refreshed overlay");
+        assert_eq!(count("textDocument/didClose"), 1, "only the PHP attachment retires the first session");
         let updated = r#"{"Greeting 😀":"Updated private value"}"#;
         replace(&mgr, json, 2, OVERLAY, updated);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while count("textDocument/didOpen") != 2 {
+            while count("textDocument/didOpen") != 3 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })

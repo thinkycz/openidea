@@ -77,7 +77,7 @@ impl LspManager {
         self.cancel_json_refreshes(|key| ids.contains(&key.doc));
     }
 
-    pub(crate) fn discover_json_catalogs_on_ready(&self, server: &Arc<Server>, generation: u64) {
+    pub(crate) fn discover_json_catalogs_for_server(&self, server: &Arc<Server>, generation: u64) {
         if server.name != "phpantom"
             || self.shutting_down.load(Ordering::Acquire)
             || !self.execution_allowed.load(Ordering::Acquire)

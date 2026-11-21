@@ -1175,7 +1175,7 @@ impl LspManager {
             self.schedule_pull(doc, Some(&server), Duration::ZERO);
         }
         self.reopen_notebooks(&server, &run);
-        self.discover_json_catalogs_on_ready(&server, generation);
+        self.discover_json_catalogs_for_server(&server, generation);
         self.check_clang_tidy(&server).await;
         self.check_vue_navigation(&server).await;
         server.refresh_busy_status(&self.sink);
@@ -1431,6 +1431,13 @@ impl LspManager {
                 self.runtime.spawn(async move { me.check_clang_tidy(&server).await });
                 let server = s.clone();
                 self.runtime.spawn(async move { hint.check_vue_navigation(&server).await });
+            }
+        }
+        if language.as_str() == "php" {
+            for server in &servers {
+                if let Some(run) = server.running() {
+                    self.discover_json_catalogs_for_server(server, run.generation);
+                }
             }
         }
         self.discover_json_document(doc);

@@ -91,6 +91,7 @@ fn validate_checked_targets(edit: &WorkspaceEdit, sources: &[ExpectedSource]) ->
 pub(super) struct ReviewedDiskState {
     metadata: Option<ReviewedDiskMetadata>,
     sha256: [u8; 32],
+    children: Option<Vec<(std::ffi::OsString, ReviewedDiskState)>>,
 }
 
 #[cfg(unix)]
@@ -127,7 +128,7 @@ fn reviewed_disk_state(path: &Path) -> Option<ReviewedDiskState> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Some(ReviewedDiskState { metadata: None, sha256: [0; 32] });
+            return Some(ReviewedDiskState { metadata: None, sha256: [0; 32], children: None });
         }
         Err(_) => return None,
     };
@@ -147,12 +148,66 @@ fn reviewed_disk_state(path: &Path) -> Option<ReviewedDiskState> {
     {
         return None;
     }
-    Some(ReviewedDiskState { metadata: Some(stamp), sha256: Sha256::digest(&bytes).into() })
+    Some(ReviewedDiskState { metadata: Some(stamp), sha256: Sha256::digest(&bytes).into(), children: None })
+}
+
+// A folder echo is safe only when its whole bounded tree still consists of
+// witnessed regular files. Unknown entries and empty subfolders remain changes.
+#[cfg(unix)]
+fn reviewed_directory_state(path: &Path, receipts: &HashMap<PathBuf, ReviewedDiskState>) -> Option<ReviewedDiskState> {
+    fn read(
+        path: &Path,
+        receipts: &HashMap<PathBuf, ReviewedDiskState>,
+        depth: usize,
+        remaining_entries: &mut usize,
+        remaining_bytes: &mut u64,
+    ) -> Option<ReviewedDiskState> {
+        if depth == 0 {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        if !metadata.is_dir() {
+            return None;
+        }
+        let stamp = ReviewedDiskMetadata::new(&metadata);
+        let mut entries =
+            std::fs::read_dir(path).ok()?.take(*remaining_entries + 1).collect::<Result<Vec<_>, _>>().ok()?;
+        if entries.is_empty() || entries.len() > *remaining_entries {
+            return None;
+        }
+        *remaining_entries -= entries.len();
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut children = Vec::new();
+        for entry in entries {
+            let child = entry.path();
+            let metadata = std::fs::symlink_metadata(&child).ok()?;
+            let state = if metadata.is_dir() {
+                read(&child, receipts, depth - 1, remaining_entries, remaining_bytes)?
+            } else {
+                let expected = receipts.get(&child)?;
+                if !metadata.is_file() || expected.children.is_some() || expected.metadata.is_none() {
+                    return None;
+                }
+                *remaining_bytes = remaining_bytes.checked_sub(metadata.len())?;
+                let current = reviewed_disk_state(&child)?;
+                if &current != expected {
+                    return None;
+                }
+                current
+            };
+            children.push((entry.file_name(), state));
+        }
+        if ReviewedDiskMetadata::new(&std::fs::symlink_metadata(path).ok()?) != stamp {
+            return None;
+        }
+        Some(ReviewedDiskState { metadata: Some(stamp), sha256: [0; 32], children: Some(children) })
+    }
+    read(path, receipts, 8, &mut 1024, &mut (8 * (1 << 20)))
 }
 
 impl LspManager {
     /// Publish a committed reviewed edit and witness its disk state for watcher echoes.
-    /// Only identical bounded regular files (or identical absence) are coalesced.
+    /// Only identical bounded files, fully witnessed folders or absence are coalesced.
     pub fn php_reviewed_files_changed(&self, created: &[PathBuf], modified: &[PathBuf], removed: &[PathBuf]) {
         self.php_files_changed_in(created, modified, removed, true);
     }
@@ -191,7 +246,12 @@ impl LspManager {
                     receipts.remove(path);
                 }
             } else if let Some(expected) = receipts.get(path) {
-                if reviewed_disk_state(path).as_ref() == Some(expected) {
+                let current = if expected.children.is_some() {
+                    reviewed_directory_state(path, &receipts)
+                } else {
+                    reviewed_disk_state(path)
+                };
+                if current.as_ref() == Some(expected) {
                     return None;
                 }
                 receipts.remove(path);
@@ -199,6 +259,19 @@ impl LspManager {
             Some(lsp::FileEvent { uri: crate::uri::path_to_uri(path), typ })
         })
         .collect();
+        #[cfg(unix)]
+        if reviewed {
+            let mut checked = HashSet::new();
+            for path in created.iter().chain(modified).chain(removed) {
+                for parent in path.ancestors().skip(1).take(8) {
+                    if !checked.insert(parent.to_path_buf()) || receipts.len() >= 4096 {
+                        break;
+                    }
+                    let Some(state) = reviewed_directory_state(parent, &receipts) else { break };
+                    receipts.insert(parent.to_path_buf(), state);
+                }
+            }
+        }
         if changes.is_empty() {
             return;
         }

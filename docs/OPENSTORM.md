@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Untitled PHP first-save slice 231 (source/client accepted):
+FEAT-001/015/031/066/068: the first definition request after an untitled PHP
+buffer's Save As returned Cancelled. Deferred watcher creation events for both the
+new file and its parent directory invalidated a request against the just-saved
+state. Two original-path executions reproduce the cancellation. A temporary
+watcher-event barrier lets both cold cases pass, isolating the deferred publication;
+it is removed from the accepted regression. Its incidental warm-up declaration
+hover expectation and the initial IPC-path type correction remain in the logs.
+
+The Host command publishes the committed path through the existing owned-write
+mechanism before returning. Directory echoes coalesce only when a stable bounded
+tree consists entirely of known, unchanged regular-file witnesses. Child digests,
+identity/metadata and exact directory entries are rechecked. Unknown entries, empty
+subdirectories, external edits/replacements, symlinks and exceeded bounds still retire
+stale replies. The directory snapshot limits are eight levels,1,024 entries and
+an8MiB aggregate file-size budget; individual files retain the existing1MiB limit and the receipt
+map retains its4,096-entry bound. Unsupported trees continue through normal
+watcher invalidation. Explorer/watch notifications remain delivered.
+
+The watcher regression first fails for duplicate directory creation, then all
+23 mutation variants pass, including nested trees and depth/entry/byte refusals.
+Actual signed191/Laravel13.37 Host acceptance passes four cold/warm and clean/dirty
+pre-save dependency combinations without a watcher wait or empty-result retry.
+It verifies stable DocId/version/physical-path rekeying, exact UTF-16 definitions
+and hover, completion, unsaved dependency precedence, restart/reopen, post-save
+autosave/explicit-save refusal, revision-bound consent and eight owned engine PID
+exits. This covers saving to a new path and subsequent conflict review; initial
+Save As over an existing closed target and actual editor undo remain unverified.
+
+Fresh workspace tests pass 5,632, with 264 ignored and exactly11
+HTTP-confirmation/direnv exclusions. All-target workspace Clippy with warnings
+denied and Rust formatting pass. All138 freshly compiled actual-engine cases pass:
+75 client/63 Host, including48 completion Host cases. Frontend type/lint/format/
+Knip,14,603 tests/eight skips, production build/Safari compatibility and17 controlled
+Laravel browser flows pass. Engine191/source226 acceptance is reused unchanged.
+
+Latest regression executables replace the older payload only after acceptance;
+all six launch and list their expected cases after compiler cleanup. Removed:
+Removed 22234 files, 30.9GiB total. Frontend dist removal:
+73,745,139 bytes. App120/default191, source pins,
+licenses, WIT and both stashes remain unchanged. Source230/231 are not packaged in
+App120. Native GUI stays user-skipped; installation, migration, notarization,
+publishing, updater activation and debugger expansion stay deferred. Broader
+provider/catalog first-save, concurrent project/configuration, performance and
+other roadmap cases remain open. All69 areas retain67 partial/two user-deferred
+states. Evidence: artifacts/checks/slice231/{gates,green-real,evaluation,
+frozen-runtimes,retention,retained-runtime-lists}.json and baseline/control logs.
+Normal commit/push and remote equality are recorded in the delivery receipt.
+
 Shared-consumer background preparation slice 230 (source/client accepted):
 FEAT-031/066/067/068: when no JSON catalog is open, background recovery prepares
 statically declared provider buffers for the live Composer contexts sharing one

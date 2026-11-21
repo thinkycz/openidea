@@ -47,6 +47,7 @@ pub async fn doc_save_as(host: &Host, window: &str, doc: DocId, path: PathBuf) -
     let project = host.project(window)?;
     host.blocking(move || {
         let info = project.documents.save_as(doc, &path)?;
+        project.lsp.php_reviewed_files_changed(&[info.path.to_path_buf()], &[], &[]);
         if let Some(dir) = path.parent().filter(|_| project.light) {
             project.watch_light_dir(dir);
         }

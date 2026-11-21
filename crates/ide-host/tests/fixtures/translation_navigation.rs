@@ -1050,3 +1050,170 @@ async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find
     .await;
     f.finish(outcome).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, owned PHP and Laravel 13.37 vendor fixture"]
+async fn untitled_translation_callers_keep_identity_dependencies_and_save_conflicts_after_first_save() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor fixture"))
+        .canonicalize()
+        .unwrap();
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(vendor.join("composer/installed.json")).unwrap()).unwrap();
+    assert!(
+        installed["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| { p["name"] == "laravel/framework" && p["version"] == "v13.37.0" })
+    );
+    Fixture::lint(CALLER);
+    for (warm_before_save, dirty_before_save) in [(false, false), (false, true), (true, false), (true, true)] {
+        let extra = vec![
+            ("lang/en/messages.php".into(), EN.into()),
+            ("lang/fr/messages.php".into(), FR.into()),
+            ("app/Shared/Selected.php".into(), SELECTED.into()),
+        ];
+        let (mut f, ()) = Fixture::new_at_with_fixture_setup(
+            "First-save fixture",
+            &extra,
+            "notes.txt",
+            |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+            |_, _| (),
+        );
+        println!("first-save case warm={warm_before_save} dirty={dirty_before_save}");
+        let mut owned_pids = Vec::new();
+        let outcome = std::panic::AssertUnwindSafe(async {
+            assert!(f.project.lsp.servers().is_empty(), "a plaintext editor must not start PHPantom");
+            let draft = ide_host::ops::doc::doc_open_untitled(&f.host, "main", None).await.unwrap();
+            let version = ide_host::ops::doc::doc_edit(
+                &f.host,
+                "main",
+                draft.id,
+                draft.version,
+                ide_core::ChangeSet { changes: vec![ide_core::TextChange { from: 0, to: 0, insert: CALLER.into() }] },
+            )
+            .await
+            .unwrap();
+            let dependency = (warm_before_save || dirty_before_save).then(|| {
+                let info = f.project.documents.open(&f.root.join("app/Shared/Selected.php")).unwrap();
+                if dirty_before_save {
+                    f.project.documents.replace_all(info.id, FOREIGN).unwrap();
+                }
+                info.id
+            });
+            if warm_before_save {
+                let text = if dirty_before_save { FOREIGN } else { SELECTED };
+                // Await a real LSP round trip before saving the new PHP file.
+                let _ = ide_host::ops::lsp::lsp_hover(
+                    &f.host,
+                    "main",
+                    RequestId::next(),
+                    dependency.unwrap(),
+                    at(text, text.find("Selected").unwrap()),
+                )
+                .await
+                .unwrap();
+            }
+            let target = f.root.join("app/TranslationHost/Foreign.php");
+            assert!(f.project.documents.is_untitled(draft.id).unwrap());
+            if !warm_before_save && !dirty_before_save {
+                assert!(f.project.lsp.servers().is_empty(), "first save must exercise a cold PHP server");
+            }
+            assert!(!target.exists());
+            let saved = ide_host::ops::doc::doc_save_as(&f.host, "main", draft.id, target.clone()).await.unwrap();
+            assert_eq!(saved.id, draft.id);
+            assert_eq!(saved.version, version);
+            assert_eq!(saved.language.as_str(), "php");
+            assert!(saved.uri.is_none() && !saved.dirty);
+            assert_eq!(saved.path, target);
+            assert_eq!(f.project.documents.by_path(&target), Some(draft.id));
+            assert_eq!(f.project.documents.by_path(&draft.path), None);
+            assert_eq!(std::fs::read_to_string(&target).unwrap().replace("\r\n", "\n"), CALLER);
+            f.doc = draft.id;
+            targets(&f, if dirty_before_save { &[] } else { &["en", "fr"] }).await;
+            let server = f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap();
+            owned_pids.push(server.pid.expect("first-saved PHP server is running"));
+            f.project.lsp.restart(server.id).await.unwrap();
+            targets(&f, if dirty_before_save { &[] } else { &["en", "fr"] }).await;
+            owned_pids.push(
+                f.project
+                    .lsp
+                    .servers()
+                    .into_iter()
+                    .find(|current| current.id == server.id)
+                    .unwrap()
+                    .pid
+                    .expect("restarted PHP server is running"),
+            );
+            if let Some(dependency) = dependency {
+                assert_eq!(std::fs::read_to_string(f.root.join("app/Shared/Selected.php")).unwrap(), SELECTED);
+                f.project.documents.close(dependency);
+                targets(&f, &["en", "fr"]).await;
+            }
+            let completion = f.complete(at(CALLER, CALLER.find("messages.hello").unwrap() + "messages.he".len())).await;
+            assert!(completion.items.iter().any(|item| item.label == "messages.hello"), "{completion:?}");
+            let reopened = ide_host::ops::doc::doc_open(&f.host, "main", target.clone()).await.unwrap();
+            assert_eq!(reopened.id, draft.id, "first save must keep the editor identity");
+            let suffix = "// Local edit 😀\n";
+            let end = CALLER.encode_utf16().count() as u32;
+            ide_host::ops::doc::doc_edit(
+                &f.host,
+                "main",
+                draft.id,
+                version,
+                ide_core::ChangeSet {
+                    changes: vec![ide_core::TextChange { from: end, to: end, insert: suffix.into() }],
+                },
+            )
+            .await
+            .unwrap();
+            let external = "<?php /* External first */\n";
+            std::fs::write(&target, external).unwrap();
+            assert!(!ide_host::ops::doc::doc_autosave(&f.host, "main", draft.id).await.unwrap());
+            assert!(ide_host::ops::doc::doc_save(&f.host, "main", draft.id).await.is_err());
+            let consent = ide_host::ops::doc::save_checked(&f.host, "main", draft.id, None).await.unwrap().unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), external);
+            let newer = "<?php /* External second */\n";
+            std::fs::write(&target, newer).unwrap();
+            let current =
+                ide_host::ops::doc::save_checked(&f.host, "main", draft.id, Some(consent)).await.unwrap().unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), newer);
+            assert!(
+                ide_host::ops::doc::save_checked(&f.host, "main", draft.id, Some(current)).await.unwrap().is_none()
+            );
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), format!("{CALLER}{suffix}"));
+            for (path, text) in
+                [("lang/en/messages.php", EN), ("lang/fr/messages.php", FR), ("app/Shared/Selected.php", SELECTED)]
+            {
+                assert_eq!(std::fs::read_to_string(f.root.join(path)).unwrap(), text);
+            }
+        })
+        .catch_unwind()
+        .await;
+        if outcome.is_err() {
+            for event in f.events.lock().unwrap().iter() {
+                if let ide_core::IdeEvent::FsChanged { created, modified, removed, .. } = event {
+                    eprintln!(
+                        "first-save observed files: created={created:?} modified={modified:?} removed={removed:?}"
+                    );
+                }
+            }
+        }
+        f.finish(outcome).await;
+        for pid in owned_pids {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while std::process::Command::new("/bin/kill")
+                    .args(["-0", &pid.to_string()])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("owned first-save PHPantom process must exit after shutdown");
+        }
+    }
+}

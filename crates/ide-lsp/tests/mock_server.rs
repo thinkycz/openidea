@@ -8256,6 +8256,18 @@ async fn laravel_content_root_changes_retire_held_replies_but_noops_do_not() {
 async fn reviewed_php_watcher_echo_preserves_navigation_but_external_changes_retire_it() {
     for mutation in [
         "duplicate created",
+        "duplicate directory created",
+        "nested directory created",
+        "directory external child changed",
+        "directory external child replaced",
+        "directory external file added",
+        "directory external empty directory added",
+        "directory unowned child",
+        "directory symlink",
+        "directory large",
+        "directory depth bound",
+        "directory entry bound",
+        "directory byte bound",
         "owned removed but present",
         "owned modified but absent",
         "external changed",
@@ -8269,23 +8281,52 @@ async fn reviewed_php_watcher_echo_preserves_navigation_but_external_changes_ret
     ] {
         let h = harness_for("php", "php", &[("phpantom", checked_php_caps())], &[]);
         let (doc, path) = h.open("caller.php", "<?php total();\n");
-        let tracked = h.root.join("Tracked.php");
+        let directory = h.root.join("Saved");
+        let tracked = if mutation.contains("directory") {
+            let parent = if mutation == "nested directory created" {
+                directory.join("Nested")
+            } else if mutation == "directory depth bound" {
+                directory.join("1/2/3/4/5/6/7/8/9")
+            } else {
+                directory.clone()
+            };
+            std::fs::create_dir_all(&parent).unwrap();
+            parent.join("Tracked.php")
+        } else {
+            h.root.join("Tracked.php")
+        };
         let original = "<?php function total() {}\n";
-        if mutation == "symlink" {
+        if matches!(mutation, "symlink" | "directory symlink") {
             let target = h.root.join("Target.php");
             std::fs::write(&target, original).unwrap();
             std::os::unix::fs::symlink(target, &tracked).unwrap();
-        } else if mutation == "large" {
+        } else if matches!(mutation, "large" | "directory large") {
             std::fs::write(&tracked, "x".repeat((1 << 20) + 1)).unwrap();
         } else if !mutation.starts_with("missing") && mutation != "owned modified but absent" {
             std::fs::write(&tracked, original).unwrap();
+        }
+        let mut owned = vec![tracked.clone()];
+        let (count, contents) = if mutation == "directory entry bound" {
+            (1024, original.to_owned())
+        } else if mutation == "directory byte bound" {
+            (9, "x".repeat(1 << 20))
+        } else {
+            (0, String::new())
+        };
+        for index in 0..count {
+            let path = directory.join(format!("Owned{index}.php"));
+            std::fs::write(&path, &contents).unwrap();
+            owned.push(path);
+        }
+        if mutation == "directory unowned child" {
+            std::fs::write(directory.join("Unowned.php"), original).unwrap();
         }
         h.wait_status("phpantom", ServerStatus::Ready).await;
         if mutation != "unowned" {
             if mutation.starts_with("missing") || mutation == "owned removed but present" {
                 h.mgr.php_reviewed_files_changed(&[], &[], std::slice::from_ref(&tracked));
             } else {
-                h.mgr.php_reviewed_files_changed(&[], std::slice::from_ref(&tracked), &[]);
+                h.mgr.php_reviewed_files_changed(&[], &owned, &[]);
             }
         }
         let state = h.launcher.state("phpantom");
@@ -8303,6 +8344,20 @@ async fn reviewed_php_watcher_echo_preserves_navigation_but_external_changes_ret
         let pending = tokio::spawn(async move { mgr.goto(doc, Pos::new(0, 7), GotoKind::Definition).await });
         eventually(|| gate.entered()).await;
         match mutation {
+            "directory external child changed" => {
+                std::fs::write(&tracked, original.replace("total", "other")).unwrap();
+            }
+            "directory external child replaced" => {
+                let replacement = directory.join("Replacement.php");
+                std::fs::write(&replacement, original).unwrap();
+                std::fs::rename(replacement, &tracked).unwrap();
+            }
+            "directory external file added" => {
+                std::fs::write(directory.join("Other.php"), original).unwrap();
+            }
+            "directory external empty directory added" => {
+                std::fs::create_dir(directory.join("Unknown")).unwrap();
+            }
             "external changed" => {
                 std::fs::write(&tracked, original.replace("total", "other")).unwrap();
             }
@@ -8315,7 +8370,10 @@ async fn reviewed_php_watcher_echo_preserves_navigation_but_external_changes_ret
             "missing recreated" => std::fs::write(&tracked, original).unwrap(),
             _ => {}
         }
-        if matches!(mutation, "removed" | "missing duplicate" | "owned modified but absent") {
+        if mutation.contains("directory") {
+            h.mgr.php_files_changed(std::slice::from_ref(&directory), &[], &[]);
+            h.mgr.watched_files_changed(std::slice::from_ref(&directory), &[], &[], &[]);
+        } else if matches!(mutation, "removed" | "missing duplicate" | "owned modified but absent") {
             h.mgr.php_files_changed(&[], &[], std::slice::from_ref(&tracked));
             h.mgr.watched_files_changed(&[], &[], std::slice::from_ref(&tracked), &[]);
         } else {
@@ -8325,14 +8383,27 @@ async fn reviewed_php_watcher_echo_preserves_navigation_but_external_changes_ret
         gate.open();
         let result = pending.await.unwrap();
         h.mgr.shutdown_all().await;
-        let expected_notifications =
-            if matches!(mutation, "duplicate created" | "missing duplicate" | "unowned") { 1 } else { 2 };
+        let expected_notifications = if matches!(
+            mutation,
+            "duplicate created"
+                | "duplicate directory created"
+                | "nested directory created"
+                | "missing duplicate"
+                | "unowned"
+        ) {
+            1
+        } else {
+            2
+        };
         assert_eq!(
             state.notified("workspace/didChangeWatchedFiles").len(),
             expected_notifications,
             "every real change must still reach the server: {mutation}"
         );
-        if matches!(mutation, "duplicate created" | "missing duplicate") {
+        if matches!(
+            mutation,
+            "duplicate created" | "duplicate directory created" | "nested directory created" | "missing duplicate"
+        ) {
             assert!(
                 matches!(&result,Ok(locations) if locations.len()==1 && locations[0].path==path),
                 "reviewed write echo must not retire unchanged navigation: {mutation}: {result:?}"

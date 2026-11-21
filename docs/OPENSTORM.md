@@ -15,6 +15,63 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 232 (local development App 121 accepted):
+OpenStorm 0.1.121 packages client slice 230 (shared-consumer provider preparation)
+and slice 231 (first-save publication and owned-directory watcher protection),
+using the unchanged signed PHPantom 191. All 138 current client/Host cases pass
+against the actual embedded executable: 75 client and 63 Host, including 48
+completion Host cases. The four first-save combinations cover cold/warm servers,
+clean/dirty dependencies, exact UTF-16 navigation, completion, restart, post-save
+revision consent and owned process exits. The retained slice 231 source, binary
+and Cargo fingerprint witnesses match; only 47 local Cargo package versions and
+application version metadata change.
+
+The initial standalone navigation attempt stopped before engine startup because
+the package harness omitted its unchanged unit-cases fixture. Restoring that
+input from slice 229 resolved the harness failure; the failed log and input
+checksum remain recorded. The passing 138-case stage was retained without rerun.
+
+Standalone embedded-engine navigation passes 13 positive and seven negative
+cases, 17 exact references and 17 catalog-origin references, dirty inputs,
+diagnostics, restart and graceful exit. Four configured-PHP route/view cases
+pass. The Laravel 13.37 reference fixture passes 121 syntax files, 387 runtime
+assertions and exactly three intentional diagnostics. All 17 controlled Laravel
+browser flows pass. Fresh checks also pass for types, lint, formatting, Knip,
+14,603 frontend tests (eight existing skips), the production build and Safari
+compatibility, 24 version/provenance tests, ten packaging/pruning tests, Rust
+formatting, three resource tests and resource all-target Clippy, source pin
+replay/checksum and the native build.
+
+Reused evidence is explicitly source-matched: slice 231 application workspace
+(5,632 passed, 264 ignored, exactly 11 exclusions), workspace all-target Clippy,
+138 client/Host cases and 23 watcher mutations. Unchanged engine 191 source 226
+verification (18,748 passed, 17 ignored, both release Clippy variants, production
+build and signed provenance) remains separate from fresh package checks. Actual
+rustc commands for both the app library and executable prove normal application
+cfg with debug assertions disabled for 0.1.121; only allowlisted compiler/package
+metadata is recorded. Bundle identity/version, arm64 architecture, source/build
+receipts, engine provenance/licenses and the post-probe deep/strict ad-hoc
+signature verify. The build repeats the prior development bundle's nonfatal
+Darwin compact-unwind-size warning; exception-handling performance is unmeasured.
+Minimum macOS 13 is metadata only; that OS runtime is untested.
+
+App 120 stays intact until embedded acceptance. Then App 120 and duplicate
+staging/compiler output are removed, leaving only App 121 and the latest accepted
+test payload, while preserving historical source/provenance/evaluation evidence
+and both stashes. Compiler cleanup: 13717 files, 8.6GiB total.
+Frontend dist removal: 73,745,139 bytes. Engine 191, source
+pins, WIT, licenses, settings conventions and the disabled updater stay unchanged.
+The main app is not launched or installed. Native runtime identity, menus, focus,
+shortcuts, actual editor undo, recovery/relaunch and platform/service acceptance
+remain user-skipped or unverified. Initial Save As over existing closed targets,
+provider/catalog first-save, broader graphs, concurrency, performance and the
+remaining roadmap stay open. No migration, notarization, publication, updater
+activation or debugger expansion occurs. All 69 areas remain 67 partial and two
+user-deferred. Evidence: artifacts/checks/slice232/{post-package,compiler-witness,
+reused-evidence,client-host,fixture-runtime,wire,packaged-navigation}.json and
+artifacts/batches/0.1.121/{build-receipt,retention}.json. Normal commit/push and
+remote equality are recorded in the delivery receipt.
+
 Untitled PHP first-save slice 231 (source/client accepted):
 FEAT-001/015/031/066/068: the first definition request after an untitled PHP
 buffer's Save As returned Cancelled. Deferred watcher creation events for both the
@@ -30,7 +87,7 @@ tree consists entirely of known, unchanged regular-file witnesses. Child digests
 identity/metadata and exact directory entries are rechecked. Unknown entries, empty
 subdirectories, external edits/replacements, symlinks and exceeded bounds still retire
 stale replies. The directory snapshot limits are eight levels,1,024 entries and
-an8MiB aggregate file-size budget; individual files retain the existing1MiB limit and the receipt
+an 8 MiB aggregate file-size budget; individual files retain the existing1MiB limit and the receipt
 map retains its4,096-entry bound. Unsupported trees continue through normal
 watcher invalidation. Explorer/watch notifications remain delivered.
 

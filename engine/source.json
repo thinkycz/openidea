@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "f619d3804e016fd21b8fb2e85e1fe006d587dbda06ea89192fca4ef9bc6c9140",
-  "version": "0.11.1-openstorm.197",
+  "patches_sha256": "f74fc50cd3918be7cb7ac567e04e63936e7b287593277ae561fe9807a1f6115a",
+  "version": "0.11.1-openstorm.198",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -792,6 +792,10 @@
     {
       "file": "0197-effective-trait-cast-types.patch",
       "sha256": "ebe0057e643fa8a97f84384244183e49ffa2b8306604168f2d2da3b9cd938d7c"
+    },
+    {
+      "file": "0198-accessor-alias-types-and-definitions.patch",
+      "sha256": "d3c43643900796574921e0761123b01ebac7d1870117b84a7a421397615de500"
     }
   ]
 }

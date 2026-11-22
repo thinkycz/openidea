@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 248 (local development App 0.1.128 accepted):
+Bundle exact signed PHPantom 198 from source247 and upstream76d67145f. Accessor
+aliases now follow runtime getter precedence, with exact getter definitions and
+physical-property/ordinary-method controls. Historical candidate manifests stay
+inactive; the bundled resource provenance is active198. Four version files and
+three engine inputs are the only runtime deltas. All 47 local lock versions change;
+third-party lock entries, released WIT snapshots, licenses and implementation files stay
+unchanged. Source comparison ties this package to the accepted engine and client.
+
+Fresh gates pass 15,436 frontend tests / 11 skips, types/lint/format/Knip,
+production build and Safari startup checks; 24 version/provenance tests; 10
+packaging/pruning tests; three bundled-resolution tests, strict resource Clippy
+and Rust formatting. Native compiler arguments prove normal application cfg with
+debug assertions off in both library/executable. Arm64/macOS13 metadata, bundle
+identity, source/build receipts and deep/strict ad-hoc signature verify. Main-app
+launch, installation, native GUI, notarization and OS13 runtime remain untested.
+
+The actual embedded198 passes all 145 client/Host cases (75/70;completion55),
+plus three normal formatter regressions. Fifteen accessor variants pass 45 syntax
+checks, 30 real Laravel assertions and all first hover/completion/exact-definition
+results. The Host suite checks both query orders, Unicode dirty movements,
+getter string/int/string edits, restart/discard and unchanged caller/disk bytes.
+Same-root197/198/reopen198 yields bool/string/string and modern/legacy getter
+origins, with dirty int/string on198. Broad checks pass 13 positive/seven negative
+navigation cases, 17 exact / 17 catalog-origin references, four configured PHP cases,
+121 Laravel13.37 syntax files, 387 runtime assertions and exactly three intentional
+diagnostics. All 23 selected controlled-browser Laravel/formatter/reformat cases
+pass. These observations do not establish native GUI or real-service acceptance.
+
+Reuse unchanged source247 engine 18,759 main tests / 17 ignored / two isolated children
+and both release Clippy modes. Reuse upstream76 source 5,897 Rust tests / 274 ignored /
+13 filtered (11 legacy plus two pending synthetic-env worktree cases) and strict
+workspace Clippy, tied to this package by exact source-file hashes. The previous
+transient browser-close timeout remains historical and unproven; no clock changes
+or product fix is claimed. Unusual getter casing, renamed trait aliases, opaque
+callbacks, wider private/protected/dynamic-expression and native/service matrices
+remain open. All 69 area statuses remain 67 partial / two debugger user-deferred.
+
+Keep App127 through embedded acceptance, then prune it. Remove resource-check
+compiler output before the native build; remove native compiler/staging output
+and 86,209,384 bytes of frontend dist after acceptance. Retain only
+App128 and the latest seven regression executables. Preserve Workbench, canonical
+engines, licenses/provenance, earlier evaluation evidence and both original stashes.
+No debugger expansion, profile migration, updater activation, real deployment or
+public app release is performed. The two additional environment-file worktree
+tests remain unrun under the existing guard; no environment file changes occur.
+
+Latest app: artifacts/batches/0.1.128/OpenStorm.app.
+Main SHA256: e022b77d232150fcf5c69ee5614d73151d15c3968475a8f697af93342b671ec6.
+Embedded198 SHA256: ad5c5611532d07f9e20e2bd7e55db65646eca0afac669117fd10e9075a70a7b5.
+Evidence: artifacts/checks/slice248/{input,source-match,pipeline,compiler-witness,
+embedded,client-host,probe-198,upgrade-freshness,post-package,delivery}.json.
+
 Upstream integration (76d67145f; automated source acceptance verified):
 Merge 45 commits after c209e189e: Git workflows, npm scripts, Biome/Stylelint/
 Tailwind support, editor fixes and URL dependency pins. Keep OpenStorm 0.1.127,

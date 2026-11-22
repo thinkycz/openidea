@@ -15,6 +15,46 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 240 (local development App124 accepted):
+OpenStorm0.1.124 promotes exact signed194 and packages239effective Eloquent cast
+origins/types:comments,method precedence,last duplicate values and CRLF bounds.
+Default source/resources/provenance match the accepted194 pin and checksum;
+historical candidate manifests remain inactive. Branding,identifier,keymaps,
+layout,settings/project compatibility and disabled updater source are preserved.
+
+Fresh gates pass:10packaging/pruning tests,24version/provenance tests,types,lint,
+format,Knip,14,680frontend tests/eight skips,Rustfmt,resource3/all-targetClippy,
+native arm64 build and actual normal-cfg compiler witnesses for lib+executable.
+Only4version+3engine files differ outside progress records;source comparison
+checks6893hashes.47local lock versions change,no third-party blocks.
+Version-only setters preserve the full released WIT snapshot. Source239workspace
+5635/267ignored/same11exclusions/alltargetClippy and194engine18752/17ignored/two
+child groups/bothClippymodes remain explicitly reused against exact sources.
+
+Actual embedded194 passes141client/Host (75+66,completion/navigation51),including
+both no-retry Eloquent regressions,plus3formatter Host tests/84primary scenarios.
+Fresh probes pass13positive/seven negative navigation,17exact/17catalog-origin
+references,four configured-PHP cases,121Laravel13.37 syntax files,387runtime
+assertions and exactly three intentional diagnostics.23controlled browser cases
+pass. Deep/strict ad-hoc signature verification passes after embedded probes;
+version,identity,architecture,source/build receipts and owned process exit pass.
+Main app GUI,installation,notarization and OS13runtime remain untested/deferred.
+The inherited Darwin unwind-table warning remains without a performance claim.
+
+App123 stayed through acceptance,then was pruned. Only App124/latest7regression
+executables remain;8.6GiBcompiler/staging and73,749,818bytes frontend dist removed.
+Source/evaluation evidence,Workbench,licenses,WIT and both stashes remain.
+Broader Eloquent inheritance,real-member precedence,schema-only navigation,
+dynamic/unpacked casts,large-model costs and full69area acceptance remain open.
+No whole-area promotion:67partial/two debugger-deferred. No migration,publication,
+updater activation or new debugger functionality. Native GUI stays user-skipped.
+
+Latest local app:artifacts/batches/0.1.124/OpenStorm.app.
+Main SHA256:4338dc2408eb77f3ed30744a0f9a003527bee9383cdbc38f6a4203469a182cf5.
+Embedded194 SHA256:ba8f257433543eab4f20c70a0f2b92eaabcdfbadcb4acd8f0fad7fadd7984f31.
+Evidence:artifacts/checks/slice240/{pipeline,source-match,compiler-witness,embedded,
+client-host,post-package}.json;artifacts/batches/0.1.124/build-receipt.json.
+
 Eloquent origin slice 239 (inactive signed194 accepted):
 Actual embedded193 protocol probes reproduce four failures: a cast definition
 inside a comment, a method cast navigating to its overridden property, duplicate

@@ -15,6 +15,54 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 238 (local development App123 accepted):
+OpenStorm0.1.123 promotes signed PHPantom193 and packages source237's commented
+Eloquent cast inference and UTF-16 physical declaration fixes. Engine/source.json
+matches the accepted193 source pin, and application resources match signed193's
+bytes/provenance/licenses. Candidate manifests remain historical/inactive;
+resource provenance marks193 active. The application keeps normal branding,
+identifier, layout/keymaps/settings conventions and the disabled updater.
+
+Fresh gates pass:10packaging/pruning tests,24version/provenance tests,types,
+lint,formatting,Knip,14,680frontend tests/eight existing skips,Rust formatting,
+three bundled-resource tests/resource all-target Clippy and native arm64 build.
+Actual rustc arguments prove desktop lib+executable use normal app cfg with
+debug assertions off. Source comparison checks6,890file hashes: only four
+version files and three promoted engine files differ from237, outside progress
+records. Cargo.lock changes47local versions, no third-party blocks. Version-only
+setters avoid release-helper snapshot sync; released WIT file set/bytes stay
+unchanged. Source237 workspace5635/266ignored/same11exclusions/all-targetClippy
+and193 engine18750/17ignored/two isolated child groups/bothClippy modes are
+explicitly reused against exact source and signed-engine witnesses.
+
+The actual embedded193 passes140client/Host cases (75+65,completion/navigation50),
+including the unchanged no-retry Eloquent cast regression, plus three real Host
+formatter regressions/84primary scenarios. Fresh standalone probes pass13positive
+and seven negative navigation cases,17exact and17catalog-origin references,
+four configured-PHP route/view cases,121Laravel13.37 syntax files,387runtime
+assertions and exactly three intentional diagnostics. All23controlled browser
+flows pass. Deep/strict ad-hoc signature verification passes after all embedded
+probes, with normal identity/version/source/build receipts and no owned app,
+engine or browser-server processes left running. These checks do not launch the
+main app or establish native GUI acceptance.
+
+App122 was retained through acceptance, then removed. Only App123 and the latest
+seven237regression executables remain;compiler/staging output removed8.6GiB,
+frontend dist removed73,749,818bytes. Immutable source/evaluation evidence,
+licenses,all69areas and both stashes are preserved. Native GUI/install/notarization,
+OS13runtime/performance and real platform/services remain unverified or deferred;
+the inherited Darwin unwind-table warning remains without a performance claim.
+Schema-only physical navigation, duplicate quoted-key comments and broader
+Eloquent/relationships/scopes/collections still need acceptance. No whole-area
+promotion:67partial/two debugger-deferred. No migration/publication/updater or
+new debugger functionality.
+
+Latest local app: artifacts/batches/0.1.123/OpenStorm.app.
+Main SHA256:a70dac19fca915e4e0527ed8b4f06eab6865f1c8dd9ae5cc2eaedd2f6eaf1fc1.
+Embedded193 SHA256:5b6a254415ec5e0a8c2b37dedd4a5ee8a5c4f020a1be87ab9fa4d1059e1ff9cb.
+Evidence:artifacts/checks/slice238/{pipeline,source-match,compiler-witness,
+embedded,client-host,post-package}.json;artifacts/batches/0.1.123/build-receipt.json.
+
 Eloquent navigation slice 237 (inactive candidate193 accepted):
 Actual Host checks first reproduced two engine defects without result retries.
 The initial clean cast hover/definition passes on191; the first hover after an

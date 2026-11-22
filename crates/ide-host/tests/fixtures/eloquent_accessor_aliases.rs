@@ -11,6 +11,8 @@ struct AccessorCase {
     definition_name: String,
     physical: bool,
     ordinary_method: bool,
+    #[serde(default)]
+    setter: bool,
 }
 
 fn target_offset(case: &AccessorCase, model: &str) -> usize {
@@ -53,6 +55,15 @@ async fn check(f: &Fixture, case: &AccessorCase, model: &str, expected_type: &st
         .expect("first accessor completion");
     let item = completion.items.iter().find(|item| item.label == case.property).expect("runtime attribute completion");
     assert_eq!(item.detail.as_deref(), Some(expected_type), "{}", case.name);
+    if case.setter {
+        let write = at(&case.caller, case.caller.find(&format!("->{} =", case.property)).unwrap() + 2);
+        let locations =
+            ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, write, GotoKind::Definition).await.unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(*locations[0].path, f.root.join("app/Models/Bakery.php"));
+        let point = at(model, target_offset(case, model));
+        assert_eq!(locations[0].range, Range::new(point, point));
+    }
     if case.ordinary_method {
         let method = at(&case.caller, case.caller.find("->qualityLabel()").unwrap() + 2);
         let hover =

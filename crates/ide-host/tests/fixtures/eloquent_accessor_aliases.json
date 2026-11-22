@@ -148,5 +148,107 @@
     "definition_name": "getQualityLabelAttribute",
     "physical": false,
     "ordinary_method": true
+  },
+  {
+    "name": "case-insensitive GETQualityLabelAttribute qualityLabel cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function GETQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "GETQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive getQualityLabelATTRIBUTE quality_label cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality_label'=>'bool']; public function getQualityLabelATTRIBUTE(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->quality_label;\n",
+    "property": "quality_label",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelATTRIBUTE",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive getqualityLabelAttribute qualityLabel cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function getqualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getqualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive getqualitylabelattribute qualityLabel cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function getqualitylabelattribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getqualitylabelattribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive GETQUALITYLABELATTRIBUTE quality_label cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality_label'=>'bool']; public function GETQUALITYLABELATTRIBUTE(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->quality_label;\n",
+    "property": "quality_label",
+    "expected_type": "string",
+    "definition_name": "GETQUALITYLABELATTRIBUTE",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive getqualityLabelAttribute qualityLabel no cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { public function getqualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getqualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive getqualitylabelattribute qualitylabel no cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { public function getqualitylabelattribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualitylabel;\n",
+    "property": "qualitylabel",
+    "expected_type": "string",
+    "definition_name": "getqualitylabelattribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive GETQualityLabelAttribute qualityLabel no cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { public function GETQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "GETQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "case-insensitive SETQualityLabelATTRIBUTE",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function SETQualityLabelATTRIBUTE($value): void { $this->attributes['qualityLabel'] = '1'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n$b->qualityLabel = 'anything';\n",
+    "property": "qualityLabel",
+    "expected_type": "bool",
+    "definition_name": "SETQualityLabelATTRIBUTE",
+    "physical": false,
+    "ordinary_method": false,
+    "setter": true
+  },
+  {
+    "name": "case-insensitive setqualitylabelattribute",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality_label'=>'bool']; public function setqualitylabelattribute($value): void { $this->attributes['quality_label'] = '1'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->quality_label;\n$b->quality_label = 'anything';\n",
+    "property": "quality_label",
+    "expected_type": "bool",
+    "definition_name": "setqualitylabelattribute",
+    "physical": false,
+    "ordinary_method": false,
+    "setter": true
   }
 ]

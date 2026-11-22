@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 249 (accepted source/client; legacy accessor and mutator casing):
+PHPantom's legacy-name filter rejected getter/setter spellings that PHP and Laravel
+resolve case-insensitively. Correct the shared prefix/suffix filter and remove its
+uppercase-middle restriction. Keep property names case-sensitive; reject empty
+names, ordinary underscore-containing methods and invalid UTF-8 slice boundaries.
+Method lookup was already case-insensitive; the explicit lookup alias is not an
+independent semantic fix. No default resource, application version or IPC changes.
+
+Actual bundled198 reproduces eight failing getter variants out of nine and four
+failing setter read/write targets out of six. Signed candidate199 passes all nine
+getter type/completion/exact-definition cases and all six setter navigation targets.
+Twelve models pass 36 PHP syntax checks and 24 real Laravel runtime assertions;
+three additional runtime controls preserve ordinary methods and bool casts.
+The actual Host fixture expands from 15 to 25 models. Both query orders, Unicode
+dirty declaration movement, string/int/string getter edits, restart/discard,
+setter read/write targets and unchanged caller/disk bytes pass on199. The expanded
+fixture fails as expected on198 before passing on199. Same-root198/199/reopen199
+and unsaved dependency checks retain fresh types and exact getter origins.
+
+Fresh engine gates pass 18,761 main tests / 17 ignored / two isolated children,
+28 focused accessor tests, both strict release Clippy modes and formatting.
+Fresh editor gates pass 5,897 Rust tests / 274 ignored / 13 filtered, strict
+workspace Clippy, 15,436 frontend tests / 11 skips, types/lint/format/Knip,
+production build/Safari startup, 19 provenance tests and 23 controlled-browser
+cases. All 145 actual PHPantom199 client/Host cases (75/70; completion55) and
+three normal formatter regressions pass. The 13 Rust exclusions remain the
+11 established cases and two pending synthetic-env worktree tests; no new skips.
+Regression executables strip symbols for disk headroom, with debug assertions
+and overflow checks retained and actual Cargo profiles recorded. No app profile
+or debugger behavior changes. Remove the temporary task-owned Cargo wrapper.
+
+Candidate199 remains inactive and unbundled. App0.1.128/default198 stays the sole
+packaged app, byte-identical and deep/strict signature verified. Remove owned
+engine/editor compiler output and frontend dist after acceptance; retain only the
+latest seven regression executables. Preserve Workbench, canonical sources,
+engine provenance/licenses, earlier evidence and both original stashes.
+Native GUI checks remain user-skipped. Packaging199 is a separate next slice.
+Wider property spellings, renamed trait aliases, visibility/dynamic expressions,
+opaque callbacks and native/service matrices remain unverified. All 69 statuses
+remain 67 partial / two debugger user-deferred; no whole-area parity claim.
+Candidate199 SHA256: fa3759a4dc1e38abe1a60c50bfd0c8500329de1c422754e89a0e3bf9f3def22f.
+Source fingerprint: 6f0ae1a24a84a6e48510f08aea133feaea2d280621d5494c7fe562ed50d9da07.
+Evidence: artifacts/checks/slice249/{engine-gates,probe-198,probe-199,setter-198,
+setter-199,ordinary-controls,upgrade-freshness,actual198-host-red,evaluation,
+workspace-strip-profile,final-gates,retention,acceptance,delivery}.json.
+
 Package slice 248 (local development App 0.1.128 accepted):
 Bundle exact signed PHPantom 198 from source247 and upstream76d67145f. Accessor
 aliases now follow runtime getter precedence, with exact getter definitions and

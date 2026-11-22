@@ -1,0 +1,137 @@
+--- a/src/virtual_members/laravel/accessors.rs
++++ b/src/virtual_members/laravel/accessors.rs
+@@ -13,33 +13,27 @@
+ /// Laravel 9+ modern accessors/mutators.
+ const ATTRIBUTE_CAST_FQN: &str = "Illuminate\\Database\\Eloquent\\Casts\\Attribute";
+ 
+-/// Determine whether a method is a legacy Eloquent accessor.
+-///
+-/// Legacy accessors follow the `getXAttribute()` naming convention where
+-/// `X` starts with an uppercase letter.  For example,
+-/// `getFullNameAttribute()` is a legacy accessor that produces a virtual
+-/// property `$full_name`.
++/// Legacy accessor and mutator names use PHP's case-insensitive method identity.
++fn is_legacy_attribute_method(method: &MethodInfo, prefix: &str) -> bool {
++    let name = method.name.as_str();
++    name.len() > prefix.len() + 9
++        && name
++            .get(prefix.len()..name.len() - 9)
++            .is_some_and(|middle| !middle.contains('_'))
++        && name
++            .get(..prefix.len())
++            .is_some_and(|part| part.eq_ignore_ascii_case(prefix))
++        && name
++            .get(name.len() - 9..)
++            .is_some_and(|part| part.eq_ignore_ascii_case("Attribute"))
++}
++
+ pub(super) fn is_legacy_accessor(method: &MethodInfo) -> bool {
+-    let name = &method.name;
+-    if !name.starts_with("get") || !name.ends_with("Attribute") {
+-        return false;
+-    }
+-    // Must have at least one character between "get" and "Attribute".
+-    // "getAttribute" itself (len 12) is a real Eloquent method, not an accessor.
+-    let middle = &name[3..name.len() - 9]; // strip "get" (3) and "Attribute" (9)
+-    if middle.is_empty() {
+-        return false;
+-    }
+-    middle.starts_with(|c: char| c.is_uppercase())
++    is_legacy_attribute_method(method, "get")
+ }
+ 
+ pub(super) fn is_legacy_mutator(method: &MethodInfo) -> bool {
+-    let name = &method.name;
+-    if !name.starts_with("set") || !name.ends_with("Attribute") {
+-        return false;
+-    }
+-    let middle = &name[3..name.len() - 9];
+-    !middle.is_empty() && middle.starts_with(|c: char| c.is_uppercase())
++    is_legacy_attribute_method(method, "set")
+ }
+ 
+ /// Extract the virtual property name from a legacy accessor method name.
+@@ -106,7 +100,7 @@
+ /// `masterRecipe()` returning `BelongsToMany` is NOT an accessor even
+ /// though `snake_to_camel("master_recipe")` produces `"masterRecipe"`.
+ pub(crate) fn is_accessor_or_mutator_method(class: &ClassInfo, method_name: &str) -> bool {
+-    let method = match class.get_method(method_name) {
++    let method = match class.get_method_ci(method_name) {
+         Some(m) => m,
+         None => return false,
+     };
+--- a/src/virtual_members/laravel/accessors_tests.rs
++++ b/src/virtual_members/laravel/accessors_tests.rs
+@@ -38,9 +38,9 @@
+ 
+ #[test]
+ fn legacy_accessor_lowercase_after_get() {
+-    // getfooAttribute — first char after "get" must be uppercase.
++    // PHP resolves getFooAttribute to this method regardless of casing.
+     let method = make_method("getfooAttribute", Some("string"));
+-    assert!(!is_legacy_accessor(&method));
++    assert!(is_legacy_accessor(&method));
+ }
+ 
+ // ── legacy_accessor_property_name ───────────────────────────────
+@@ -209,3 +209,60 @@
+         .push(Arc::new(make_method("posts", Some("HasMany<Post>"))));
+     assert!(!is_accessor_or_mutator_method(&class, "posts"));
+ }
++
++#[test]
++fn legacy_accessor_and_mutator_names_follow_php_case_insensitivity() {
++    for name in [
++        "getQualityLabelAttribute",
++        "GETQualityLabelAttribute",
++        "getQualityLabelATTRIBUTE",
++        "getqualityLabelAttribute",
++        "getqualitylabelattribute",
++        "GETQUALITYLABELATTRIBUTE",
++    ] {
++        assert!(
++            is_legacy_accessor(&make_method(name, Some("string"))),
++            "{name}"
++        );
++        let setter = format!("set{}", &name[3..]);
++        assert!(is_legacy_mutator(&make_method(&setter, None)), "{setter}");
++        assert!(is_legacy_mutator(&make_method(
++            &setter.to_uppercase(),
++            None
++        )));
++    }
++    for name in [
++        "getAttribute",
++        "GETATTRIBUTE",
++        "setAttribute",
++        "SETATTRIBUTE",
++        "get",
++        "",
++        "attributes",
++        "getfoo_barAttribute",
++        "😀fooAttribute",
++        "setfoo_barAttribute",
++        "get_underAttribute",
++        "set_underAttribute",
++    ] {
++        assert!(!is_legacy_accessor(&make_method(name, None)), "{name}");
++        assert!(!is_legacy_mutator(&make_method(name, None)), "{name}");
++    }
++}
++
++#[test]
++fn accessor_method_lookup_uses_php_method_casing() {
++    for (declared, queried) in [
++        ("GETQualityLabelATTRIBUTE", "getQualityLabelAttribute"),
++        ("setqualitylabelattribute", "setQualityLabelAttribute"),
++    ] {
++        let mut class = make_class("App\\Models\\Bakery");
++        class
++            .methods
++            .push(Arc::new(make_method(declared, Some("string"))));
++        assert!(
++            is_accessor_or_mutator_method(&class, queried),
++            "{declared} {queried}"
++        );
++    }
++}

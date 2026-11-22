@@ -15,6 +15,61 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 246 (local development App0.1.127 accepted):
+Bundle exact signed PHPantom197 and source245. Trait-supplied literal casts now
+infer the effective method/property types and track unsaved bool/int/bool changes.
+All eight property and eight method navigation targets and all 16 hover responses
+are correct. Own/inherited/nested/selected/empty method precedence is accepted in
+the source evidence. Historical candidate manifests remain inactive; the resource
+provenance is active197. Four version files and three engine inputs are the only
+code/input deltas; all 47 local lock versions change, with third-party entries
+and released WIT snapshots preserved.
+
+Fresh gates pass 10 packaging/pruning tests, 24 version/provenance tests,
+15,161 frontend tests / 11 skips, types/lint/format/Knip/build/Safari checks,
+Rust formatting, three bundled-server resolution tests and strict resource Clippy.
+Actual app library/executable compiler arguments prove normal application cfg
+with debug assertions off. Arm64/macOS13 metadata, source/build receipts, bundle
+identity and deep/strict ad-hoc signature verify. Main-app launch, installation,
+notarization and macOS13 runtime checks remain unperformed.
+
+The actual embedded197 passes 144 client/Host cases (75 / 69; completion54) plus
+three normal formatter tests, including correct typing after unsaved target edits,
+both response orders, restart and discard. Direct probes pass unsaved bool/int/bool
+freshness with unchanged disk and same-project196float/197bool/reopen197bool with
+only the caller opened. Six accessor controls pass 18 syntax / 18 real Laravel
+assertions and preserve getter/setter targets. Broader probes pass 13 positive /
+seven negative navigation cases, 17 exact / 17 catalog-origin references and four
+configured PHP cases. The Laravel13.37 fixture passes 121 syntax checks, 387 runtime
+assertions and exactly three deliberate diagnostics. All 23 controlled-browser
+formatter/Laravel/reformat cases pass. This is not native GUI acceptance.
+
+Reuse exactly source245 engine 18,757 main tests / 17 ignored / two isolated
+children and both release Clippy modes, plus OpenStorm 5,747 Rust tests /
+272 ignored / the same 11 exclusions and strict all-target Clippy. Source245 input
+comparison establishes the reuse scope; its strengthened Host executable is run
+with the bundle's engine. The prior source243 intermittent stop_group race remains
+historical and unaccepted, with no process fix or new exclusion in this batch.
+CamelCase getter inference, dynamic/unpacked casts, renamed trait aliases and
+wider model/platform/service/native matrices remain open. All 69 areas stay
+67 partial / two debugger user-deferred.
+
+Keep App126 through embedded acceptance, then prune it. Remove resource-check
+compiler output before the native build; remove native compiler/staging output
+and 77,461,000 bytes of frontend dist after acceptance. Only App127 and
+the latest seven regression executables remain. Preserve Workbench, canonical
+sources, licenses/provenance, earlier evaluation receipts and both original stashes.
+Inherited native API fallback/stub, Markdown key, bundle chunk and Darwin unwind
+warnings remain; native impact and exception costs are unmeasured. No debugger
+expansion, migration, updater activation, deployment or public app release.
+
+Latest app: artifacts/batches/0.1.127/OpenStorm.app.
+Main SHA256: ac43823cee06e828fe4c96a609f8421c8130e11de7b80e41e7e19c92e9b4db6c.
+Embedded197 SHA256: 83ba9e9f945ec0113b8bd42964193068b0e1460ded529a4bb16b273fd8351821.
+Evidence: artifacts/checks/slice246/{pipeline,source-match,compiler-witness,
+embedded,client-host,wire-197,freshness,upgrade,post-package,delivery}.json;
+the app's build-receipt.json.
+
 Source slice 245 (accepted source; trait casts inference):
 PHPantom197 records literal $casts/casts() metadata on traits using the shared
 class extractor. After inheritance, select property and method origins independently

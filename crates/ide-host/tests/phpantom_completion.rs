@@ -11,6 +11,9 @@ mod eloquent_member_precedence;
 #[cfg(unix)]
 #[path = "fixtures/eloquent_navigation.rs"]
 mod eloquent_navigation;
+#[cfg(unix)]
+#[path = "fixtures/eloquent_virtual_casts.rs"]
+mod eloquent_virtual_casts;
 #[path = "fixtures/kernel_aliases.rs"]
 mod kernel_aliases;
 #[path = "fixtures/middleware_aliases.rs"]

@@ -15,6 +15,66 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 243 (accepted source; effective cast declaration owners):
+PHPantom196 fixes virtual cast properties that jumped to a same-named real trait
+method. Resolve $casts and casts() owners independently; let the method overlay
+the property, including inherited and compatible trait declarations. Gate this
+lookup to cast-backed instance properties; retain concrete-member/timestamp
+precedence, real method-call targets and accessor/mutator priority.
+
+Actual Host195 reproduces Value.php instead of Bakery.php;196 passes the exact
+Host regression across eight fixture variants, both response orders, unsaved owner
+movement, restart and discard with caller/disk bytes unchanged. Direct first
+responses improve six wrong property targets to all eight correct, preserving
+all eight method targets. A same-root195/196 upgrade probe confirms the exact
+correction without fixture changes or result retries. Forty PHP syntax checks
+and 24 real Laravel13.37 assertions validate the fixtures. CRLF/Unicode source
+ranges and accessor/mutator priority have two engine regressions. A second actual
+Host regression preserves setter targets on property reads and writes, including
+dirty target movement. Eighteen additional syntax checks and eighteen real
+Laravel assertions validate six getter/setter controls with plain, snake_case and
+camelCase keys. The first candidate bypassed setters; the failed wire and Host
+proofs are retained, and a second candidate still missed camelCase keys.
+The accepted guard reuses
+existing accessor candidates/predicates and excludes custom mutators from the
+cast fast path before rerunning all gates.
+
+Fresh engine gates: 18,756 main tests / 17 ignored / 2 isolated children,
+both release Clippy modes, formatting, source fingerprint, release build and
+strict ad-hoc arm64 signature verification. Root Rust formatting, strict all-target
+workspace Clippy and 5,747 tests / 272 ignored / same 11 exclusions pass.
+Workspace test debug information is off/stripped to fit available disk; debug
+assertions and test selection remain unchanged, witnessed in Cargo profiles.
+The first workspace run had 5,746 passes and one unchanged ide-run stop_group
+failure: a descendant's port was still reachable after RunExited. Its exact test
+and all four stop_group tests passed on rerun; retain the first failure and the
+full subsequent workspace result. This does not establish that the intermittent
+process-exit race is fixed, and no new skip or unrelated production fix is added.
+All 144 current client/Host cases (75 / 69, completion54) and three normal formatter
+Host tests pass. Fresh source/binary/provenance checks pass. Reuse byte-identical
+frontend 15,161 tests / 11 skips, types/lint/format/Knip/build/Safari and 70 controlled
+browser cases from merge4f2e4982f; this slice changes no frontend behavior.
+
+Remaining inference gaps are explicit: trait-supplied casts() still yields
+float in hover where real Laravel yields bool. That fixture checks navigation;
+its type inference is unaccepted. The accessor control also observes an existing
+camelCase getter inference gap: runtime string, hover bool on195/196. Keep both
+for subsequent small typing slices. Dynamic cast expressions and wider model matrices remain unaccepted. All 69 areas remain
+67 partial / two debugger user-deferred. Native GUI checks are user-skipped.
+
+Candidate196 is inactive and not yet bundled. App125/default195, Workbench,
+canonical sources, licenses/provenance, prior evidence and both stashes remain
+unchanged. Engine and root compiler/scratch output are removed after acceptance;
+retain only App125 and the latest seven regression executables. Native API fallback,
+stub/chunk and Darwin unwind-table warnings remain; no native impact or exception
+performance claim is made. No installation, new debugger behavior, updater
+activation, profile migration, deployment or public app release is performed.
+Source slice is committed/pushed before the separate local packaging slice.
+Signed196 SHA256: 19e71c19311f040b490c49e7f9b552ecf00c96e98a91a49bd787a9a8e76b4986.
+Evidence: artifacts/checks/slice243/{focused,candidate-focused,engine-summary,
+syntax-runtime,wire-195,wire-196,upgrade-probe,frontend-reuse,final-gates,evaluation,
+retention,delivery}.json.
+
 Upstream source merge 2026-11-22 (c209e189e; accepted source-only):
 Import 11 upstream commits since f473cd992: native skill browsing/installation,
 plugin-contributed skills and metadata, Mocha/node:test trees and rerun support,

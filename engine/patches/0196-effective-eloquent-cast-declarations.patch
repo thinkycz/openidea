@@ -1,0 +1,445 @@
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -406,6 +406,23 @@
+                     &const_class,
+                     const_name,
+                     MemberKind::Constant,
++                )
++            {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
++                locations.push(location);
++                continue;
++            }
++
++            if access_hint == MemberAccessHint::PropertyAccess
++                && access_kind == AccessKind::Arrow
++                && let Some(location) = self.eloquent_cast_declaration_location(
++                    lookup_class,
++                    uri,
++                    content,
++                    &effective_name,
++                    &class_loader,
+                 )
+             {
+                 if let Some(bits) = successful.as_mut() {
+@@ -798,6 +815,68 @@
+         Some(point_location(parsed_uri, entry_position))
+     }
+ 
++    fn eloquent_cast_declaration_location(
++        &self,
++        class: &ClassInfo,
++        uri: &str,
++        content: &str,
++        name: &str,
++        loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    ) -> Option<Location> {
++        if !extends_eloquent_model(class, loader) {
++            return None;
++        }
++        let resolved = crate::virtual_members::resolve_class_fully_cached(
++            class,
++            loader,
++            &self.resolved_class_cache,
++        );
++        if !matches!(
++            resolved.get_property(name)?.source,
++            Some(PropertySource::Cast { mutator: None, .. })
++        ) || !resolved
++            .laravel()?
++            .casts_definitions
++            .iter()
++            .any(|(key, _)| key == name)
++        {
++            return None;
++        }
++        if accessor_method_candidates(name).iter().any(|candidate| {
++            Self::find_declaring_class(class, candidate, loader)
++                .is_some_and(|(owner, _)| is_accessor_or_mutator_method(&owner, candidate))
++        }) {
++            return None;
++        }
++        // casts() overlays $casts, whose declaration is inherited independently.
++        for hint in [
++            MemberAccessHint::MethodCall,
++            MemberAccessHint::PropertyAccess,
++        ] {
++            let Some((owner, fqn, kind)) =
++                Self::find_physical_member_declaration(class, "casts", hint, loader)
++            else {
++                continue;
++            };
++            let Some((target, source)) = self.find_class_file_content(&fqn, uri, content) else {
++                continue;
++            };
++            let Some(position) = Self::find_eloquent_cast_entry(
++                &source,
++                name,
++                (owner.start_offset as usize, owner.end_offset as usize),
++                kind,
++            ) else {
++                continue;
++            };
++            return Some(point_location(
++                crate::util::declaration_uri(&target)?,
++                position,
++            ));
++        }
++        None
++    }
++
+     /// Look up a synthetic `__object_shape` property's position in the
+     /// current file's docblocks.
+     fn object_shape_property_location(
+--- a/src/definition/member/shape_keys.rs
++++ b/src/definition/member/shape_keys.rs
+@@ -17,6 +17,7 @@
+ };
+ use tower_lsp::lsp_types::Position;
+ 
++use super::MemberKind;
+ use crate::Backend;
+ 
+ impl Backend {
+@@ -185,8 +186,36 @@
+             content,
+             "eloquent_array_definition",
+             |program, source| {
+-                eloquent_node_entry(Node::Program(program), source, member_name, class_range)
+-                    .map(|offset| crate::text_position::offset_to_position(source, offset))
++                eloquent_node_entry(
++                    Node::Program(program),
++                    source,
++                    member_name,
++                    class_range,
++                    None,
++                )
++                .map(|offset| crate::text_position::offset_to_position(source, offset))
++            },
++        )
++    }
++
++    pub(in crate::definition) fn find_eloquent_cast_entry(
++        content: &str,
++        member_name: &str,
++        class_range: (usize, usize),
++        kind: MemberKind,
++    ) -> Option<Position> {
++        crate::parser::with_parsed_program(
++            content,
++            "eloquent_cast_definition",
++            |program, source| {
++                eloquent_node_entry(
++                    Node::Program(program),
++                    source,
++                    member_name,
++                    Some(class_range),
++                    Some(kind),
++                )
++                .map(|offset| crate::text_position::offset_to_position(source, offset))
+             },
+         )
+     }
+@@ -197,6 +226,7 @@
+     content: &str,
+     name: &str,
+     class_range: Option<(usize, usize)>,
++    cast_kind: Option<MemberKind>,
+ ) -> Option<usize> {
+     let bounds = match node {
+         Node::Class(c) => Some((
+@@ -219,7 +249,12 @@
+     };
+     if let Some(bounds) = bounds {
+         if class_range.is_none_or(|range| range == bounds) {
+-            return eloquent_member_entry(crate::parser::class_like_members(node)?, content, name);
++            return eloquent_member_entry(
++                crate::parser::class_like_members(node)?,
++                content,
++                name,
++                cast_kind,
++            );
+         }
+         if class_range.is_some_and(|range| range.0 < bounds.0 || range.1 > bounds.1) {
+             return None;
+@@ -228,7 +263,7 @@
+     let mut found = None;
+     node.visit_children(|child| {
+         if found.is_none() {
+-            found = eloquent_node_entry(child, content, name, class_range);
++            found = eloquent_node_entry(child, content, name, class_range, cast_kind);
+         }
+     });
+     found
+@@ -238,6 +273,7 @@
+     members: &[ClassLikeMember<'_>],
+     content: &str,
+     name: &str,
++    cast_kind: Option<MemberKind>,
+ ) -> Option<usize> {
+     let mut property_cast = None;
+     let mut method_cast = None;
+@@ -290,7 +326,12 @@
+         }
+     }
+     // Laravel merges casts() over $casts regardless of declaration order.
+-    method_cast.or(property_cast).or(fallback)
++    match cast_kind {
++        Some(MemberKind::Method) => method_cast,
++        Some(MemberKind::Property) => property_cast,
++        Some(MemberKind::Constant) => None,
++        None => method_cast.or(property_cast).or(fallback),
++    }
+ }
+ 
+ fn literal_array_entry(
+--- a/tests/integration/definition_laravel.rs
++++ b/tests/integration/definition_laravel.rs
+@@ -4673,9 +4673,12 @@
+             let caller = "<?php\n(new \\App\\Models\\User())->quality;\n";
+             let (backend, dir) =
+                 make_workspace(&[("src/Models/User.php", &php), ("src/Probe.php", caller)]);
+-            let response = open_and_goto_definition(&backend, &dir, "src/Probe.php", caller, 1, 30)
+-                .await
+-                .expect("cast declaration");
++            let prefix = &caller[..caller.find("quality").unwrap()];
++            let column = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++            let response =
++                open_and_goto_definition(&backend, &dir, "src/Probe.php", caller, 1, column)
++                    .await
++                    .expect("cast declaration");
+             let range = match response {
+                 GotoDefinitionResponse::Scalar(location) => location.range,
+                 GotoDefinitionResponse::Array(locations) => {
+@@ -4997,3 +5000,173 @@
+         }
+     }
+ }
++
++#[tokio::test]
++async fn virtual_eloquent_casts_keep_effective_owners_beside_trait_methods() {
++    #[derive(serde::Deserialize)]
++    struct Case {
++        name: String,
++        model: String,
++        base: String,
++        target: String,
++        value: Option<String>,
++    }
++    let cases: Vec<Case> =
++        serde_json::from_str(include_str!("fixtures/eloquent_virtual_casts.json")).unwrap();
++    let caller = "<?php\nuse App\\Models\\Bakery as Bread;\n$bakery = new Bread();\n/* 😀 property */ $bakery->quality;\n/* 😀 method */ $bakery->quality();\n";
++    for case in cases {
++        for crlf in [false, true] {
++            let mut files = vec![("src/Probe.php".to_owned(), caller.to_owned())];
++            for (name, body) in [
++                ("Bakery", case.model.as_str()),
++                ("Base", case.base.as_str()),
++                (
++                    "Value",
++                    case.value
++                        .as_deref()
++                        .unwrap_or("trait Value { public function quality(): int { return 7; } }"),
++                ),
++            ] {
++                let source = format!("<?php\nnamespace App\\Models;\n/* 😀 owner */ {body}\n");
++                files.push((
++                    format!("src/Models/{name}.php"),
++                    if crlf {
++                        source.replace('\n', "\r\n")
++                    } else {
++                        source
++                    },
++                ));
++            }
++            let borrowed: Vec<_> = files
++                .iter()
++                .map(|(path, text)| (path.as_str(), text.as_str()))
++                .collect();
++            let (backend, dir) = make_workspace(&borrowed);
++            for property in [true, false] {
++                let site = if property {
++                    "->quality;"
++                } else {
++                    "->quality()"
++                };
++                let prefix = &caller[..caller.find(site).unwrap() + 2];
++                let cursor = Position::new(
++                    prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++                    prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++                );
++                let response = open_and_goto_definition(
++                    &backend,
++                    &dir,
++                    "src/Probe.php",
++                    caller,
++                    cursor.line,
++                    cursor.character,
++                )
++                .await
++                .expect(&case.name);
++                let location = match response {
++                    GotoDefinitionResponse::Scalar(location) => location,
++                    GotoDefinitionResponse::Array(mut locations) => {
++                        assert_eq!(locations.len(), 1, "{} property={property}", case.name);
++                        locations.pop().unwrap()
++                    }
++                    other => panic!("{}: {other:?}", case.name),
++                };
++                let target = if property {
++                    case.target.replacen("app/", "src/", 1)
++                } else {
++                    "src/Models/Value.php".to_owned()
++                };
++                let source = &files.iter().find(|(path, _)| path == &target).unwrap().1;
++                let offset = if property {
++                    source.find("/* target */ ").unwrap() + "/* target */ ".len() + 1
++                } else {
++                    source.find("quality(): int").unwrap()
++                };
++                let prefix = &source[..offset];
++                let point = Position::new(
++                    prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++                    prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++                );
++                assert_eq!(
++                    location.uri,
++                    Url::from_file_path(dir.path().join(target)).unwrap(),
++                    "{} property={property} CRLF={crlf}",
++                    case.name
++                );
++                assert_eq!(
++                    location.range,
++                    Range::new(point, point),
++                    "{} property={property} CRLF={crlf}",
++                    case.name
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn virtual_eloquent_casts_preserve_accessor_and_mutator_declaration_priority() {
++    for (property, name, signature, body) in [
++        (
++            "quality",
++            "getQualityAttribute",
++            "getQualityAttribute(): string",
++            "return 'real';",
++        ),
++        (
++            "quality",
++            "setQualityAttribute",
++            "setQualityAttribute($value): void",
++            "$this->attributes['quality'] = $value;",
++        ),
++        (
++            "qualityLabel",
++            "getQualityLabelAttribute",
++            "getQualityLabelAttribute(): string",
++            "return 'real';",
++        ),
++        (
++            "qualityLabel",
++            "setQualityLabelAttribute",
++            "setQualityLabelAttribute($value): void",
++            "$this->attributes['qualityLabel'] = $value;",
++        ),
++    ] {
++        let model = format!(
++            "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model {{ protected $casts = ['{property}' => 'bool']; public function {signature} {{ {body} }} }}"
++        );
++        let caller = format!(
++            "<?php\n$bakery = new \\App\\Models\\Bakery();\n/* 😀 read */ $bakery->{property};\n/* 😀 write */ $bakery->{property} = '1';\n"
++        );
++        let (backend, dir) = make_workspace(&[
++            ("src/Models/Bakery.php", model.as_str()),
++            ("src/Probe.php", caller.as_str()),
++        ]);
++        for line in [2, 3] {
++            let text = caller.lines().nth(line as usize).unwrap();
++            let column = text[..text.find(property).unwrap()].encode_utf16().count() as u32;
++            let response =
++                open_and_goto_definition(&backend, &dir, "src/Probe.php", &caller, line, column)
++                    .await
++                    .unwrap();
++            let location = match response {
++                GotoDefinitionResponse::Scalar(location) => location,
++                GotoDefinitionResponse::Array(mut locations) => {
++                    assert_eq!(locations.len(), 1);
++                    locations.pop().unwrap()
++                }
++                other => panic!("{other:?}"),
++            };
++            let column = model[..model.find(name).unwrap()].encode_utf16().count() as u32;
++            assert_eq!(
++                location.uri,
++                Url::from_file_path(dir.path().join("src/Models/Bakery.php")).unwrap()
++            );
++            assert_eq!(
++                location.range,
++                Range::new(Position::new(0, column), Position::new(0, column)),
++                "{name} line={line}"
++            );
++        }
++    }
++}
+--- /dev/null
++++ b/tests/integration/fixtures/eloquent_virtual_casts.json
+@@ -0,0 +1,53 @@
++[
++  {
++    "name": "own property",
++    "model": "class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use Value; protected $casts = [/* target */ 'quality' => 'bool']; }",
++    "base": "",
++    "target": "app/Models/Bakery.php"
++  },
++  {
++    "name": "own method",
++    "model": "class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use Value; protected function casts(): array { return [/* target */ 'quality' => 'bool']; } }",
++    "base": "",
++    "target": "app/Models/Bakery.php"
++  },
++  {
++    "name": "inherited property",
++    "model": "class Bakery extends Base { use Value; }",
++    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = [/* target */ 'quality' => 'bool']; }",
++    "target": "app/Models/Base.php"
++  },
++  {
++    "name": "parent method beats child property",
++    "model": "class Bakery extends Base { use Value; protected $casts = ['quality' => 'float']; }",
++    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected function casts(): array { return [/* target */ 'quality' => 'bool']; } }",
++    "target": "app/Models/Base.php"
++  },
++  {
++    "name": "child method beats parent property",
++    "model": "class Bakery extends Base { use Value; protected function casts(): array { return [/* target */ 'quality' => 'bool']; } }",
++    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'float']; }",
++    "target": "app/Models/Bakery.php"
++  },
++  {
++    "name": "empty parent method keeps child property",
++    "model": "class Bakery extends Base { use Value; protected $casts = [/* target */ 'quality' => 'bool']; }",
++    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'float']; protected function casts(): array { return []; } }",
++    "target": "app/Models/Bakery.php"
++  },
++  {
++    "name": "trait casts method",
++    "model": "class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use Value; protected $casts = ['quality' => 'float']; }",
++    "base": "",
++    "value": "trait Value { protected function casts(): array { return [/* target */ 'quality' => 'bool']; } public function quality(): int { return 7; } }",
++    "target": "app/Models/Value.php",
++    "navigation_only": true
++  },
++  {
++    "name": "compatible inherited trait casts property",
++    "model": "class Bakery extends Base { use Value; }",
++    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'bool']; }",
++    "value": "trait Value { protected $casts = [/* target */ 'quality' => 'bool']; public function quality(): int { return 7; } }",
++    "target": "app/Models/Value.php"
++  }
++]

@@ -1,0 +1,53 @@
+[
+  {
+    "name": "own property",
+    "model": "class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use Value; protected $casts = [/* target */ 'quality' => 'bool']; }",
+    "base": "",
+    "target": "app/Models/Bakery.php"
+  },
+  {
+    "name": "own method",
+    "model": "class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use Value; protected function casts(): array { return [/* target */ 'quality' => 'bool']; } }",
+    "base": "",
+    "target": "app/Models/Bakery.php"
+  },
+  {
+    "name": "inherited property",
+    "model": "class Bakery extends Base { use Value; }",
+    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = [/* target */ 'quality' => 'bool']; }",
+    "target": "app/Models/Base.php"
+  },
+  {
+    "name": "parent method beats child property",
+    "model": "class Bakery extends Base { use Value; protected $casts = ['quality' => 'float']; }",
+    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected function casts(): array { return [/* target */ 'quality' => 'bool']; } }",
+    "target": "app/Models/Base.php"
+  },
+  {
+    "name": "child method beats parent property",
+    "model": "class Bakery extends Base { use Value; protected function casts(): array { return [/* target */ 'quality' => 'bool']; } }",
+    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'float']; }",
+    "target": "app/Models/Bakery.php"
+  },
+  {
+    "name": "empty parent method keeps child property",
+    "model": "class Bakery extends Base { use Value; protected $casts = [/* target */ 'quality' => 'bool']; }",
+    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'float']; protected function casts(): array { return []; } }",
+    "target": "app/Models/Bakery.php"
+  },
+  {
+    "name": "trait casts method",
+    "model": "class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use Value; protected $casts = ['quality' => 'float']; }",
+    "base": "",
+    "value": "trait Value { protected function casts(): array { return [/* target */ 'quality' => 'bool']; } public function quality(): int { return 7; } }",
+    "target": "app/Models/Value.php",
+    "navigation_only": true
+  },
+  {
+    "name": "compatible inherited trait casts property",
+    "model": "class Bakery extends Base { use Value; }",
+    "base": "class Base extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'bool']; }",
+    "value": "trait Value { protected $casts = [/* target */ 'quality' => 'bool']; public function quality(): int { return 7; } }",
+    "target": "app/Models/Value.php"
+  }
+]

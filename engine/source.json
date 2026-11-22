@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "39f55a79f6840b9671517ba168866cc8b3c0daadff96be1688de2d3547b6a3ad",
-  "version": "0.11.1-openstorm.195",
+  "patches_sha256": "e6a999bd1b7a6027ed629b11fbe84388569ecc2faaeb1136bf5dc670ee9a83ee",
+  "version": "0.11.1-openstorm.196",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -784,6 +784,10 @@
     {
       "file": "0195-concrete-eloquent-member-precedence.patch",
       "sha256": "f2082de6df2f76e0b45020b4072fa0e0aa31584b94f6def82a7d318912ac3968"
+    },
+    {
+      "file": "0196-effective-eloquent-cast-declarations.patch",
+      "sha256": "cd1a1a2249f05a4041947571ec12b2da5f8e03cb52ad6d7d1c646016e7373858"
     }
   ]
 }

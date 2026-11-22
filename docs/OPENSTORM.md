@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 244 (local development App0.1.126 accepted):
+Bundle exact accepted signed PHPantom196 and source243/upstreamc209. Cast
+properties now use their effective literal declaration owner while real methods
+and existing accessor/mutator mappings remain intact. Resource/source provenance
+and default196 verify; historical candidate manifests remain inactive. Four
+version files and three engine inputs are the only code/input deltas. All 47
+local lock versions change; third-party entries and released WIT snapshots do not.
+
+Fresh gates pass: 10 packaging/pruning tests, 24 version/provenance tests,
+15,161 frontend tests / 11 skips, types/lint/format/Knip, production frontend build
+and Safari startup checks, Rust formatting, three bundled-server resolution tests
+and strict resource Clippy. Actual compiler commands for app library/executable
+prove normal cfg with debug assertions off. Arm64/macOS13 metadata, app/source
+identity, source/build receipts and deep/strict ad-hoc signature checks verify.
+No installation, main-app launch, notarization or macOS13 runtime check is done.
+
+The embedded196 passes 144 actual client/Host cases (75 / 69; completion54)
+and three normal formatter Host tests. Eight cast-property and eight method
+first-response targets, six accessor controls with 18 PHP syntax / 18 real Laravel
+assertions and same-root195/196 upgrade checks pass with the bundled executable.
+Broader embedded checks pass 13 positive / seven negative navigation cases,
+17 exact / 17 catalog-origin references and four configured PHP cases. The
+unchanged Laravel13.37 fixture passes 121 syntax checks, 387 runtime assertions
+and exactly three deliberate diagnostics. All 23 selected controlled-browser
+formatter/Laravel/reformat cases pass. This is not native GUI acceptance.
+
+Reuse exactly the source243 Rust 5,747 tests / 272 ignored / same 11 exclusions
+and all-target Clippy, with the first intermittent unchanged stop_group failure
+retained. Engine196 source evidence remains 18,756 main tests / 17 ignored /
+two isolated children and both release Clippy modes. Trait-supplied casts() and
+camelCase getter type-inference gaps remain explicitly unaccepted. Wider model,
+platform/service and native UI matrices remain open. All 69 areas stay 67 partial
+and two debugger user-deferred; there is no blanket parity claim.
+
+Keep App125 through acceptance, then prune it. Only App126 and the latest seven
+regression executables remain. Compiler/staging output and 77,461,000 bytes
+of frontend dist are removed. Preserve Workbench, canonical source/engine
+provenance, licenses, previous evaluation receipts and both original stashes.
+The inherited native-API fallback/stub, Markdown key, chunk-size and Darwin unwind
+warnings remain; native impact and exception costs are unmeasured. No new
+debugger function, migration, updater activation, deployment or public app release.
+
+Latest app: artifacts/batches/0.1.126/OpenStorm.app.
+Main SHA256: e0bff97db1cff7bddc7a6a2f3319b5ec4408a4d34128f33f1a3104da7d8c6610.
+Embedded196 SHA256: 19e71c19311f040b490c49e7f9b552ecf00c96e98a91a49bd787a9a8e76b4986.
+Evidence: artifacts/checks/slice244/{pipeline,source-match,compiler-witness,
+embedded,client-host,wire-196,mutator-probe,upgrade-probe,post-package,delivery}.json;
+the app's build-receipt.json.
+
 Source slice 243 (accepted source; effective cast declaration owners):
 PHPantom196 fixes virtual cast properties that jumped to a same-named real trait
 method. Resolve $casts and casts() owners independently; let the method overlay

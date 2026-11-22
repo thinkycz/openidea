@@ -15,7 +15,58 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
-Before-commit formatting slice 235 (source accepted; not packaged):
+Package slice 236 (local development App122 accepted):
+OpenStorm 0.1.122 packages source234 live-editor formatter freshness and source235
+input-bound before-commit formatting plans on unchanged signed PHPantom191.
+The new command, derived bindings and existing guarded transaction preserve
+buffer/disk/project/version witnesses, formatter markers, recovery and grouped
+undo. The prior actual Host reproduction corrupted and saved a newer PHP string
+literal using stale formatter offsets; the source fix is now in this bundle.
+
+Fresh package checks pass: normal application build, actual rustc flags proving
+both desktop library and executable use debug assertions disabled, arm64 identity,
+version/source/build receipts, engine version/checksum/provenance/licenses and
+post-probe deep/strict ad-hoc signing. Only the four app-version manifests/lock
+change outside progress records: 47 local Cargo versions, no third-party lock or
+production logic delta from235. The release helper's tracked plugin snapshot changes were restored before
+checks. The final clean-worktree gate caught one additional untracked generated
+hover-actions fixture; it was archived and removed after verifying it matched the
+helper's source. The released snapshot's full file set and bytes now match the
+original. That test-only residue was not an input to the native application.
+Ten packaging/pruning and24 version/provenance tests pass, with types, lint,
+formatting, Knip,14,680 frontend tests/eight existing skips, Rust formatting,
+three resource-resolution tests and resource all-target Clippy. The native build
+repeats the inherited nonfatal Darwin unwind-table warning; its performance
+impact and macOS13 runtime remain unmeasured (minimumOS13 metadata only).
+
+Retained current235 executables pass139 actual client/Host cases against the
+new bundle's embedded engine, plus three formatter Host regressions with84 primary
+PHP/plaintext scenario combinations. Their source/binary/fingerprint receipts
+match, with only the verified version metadata delta; these are reused test
+executables, not main-app GUI checks. Fresh embedded probes also pass13 positive
+and seven negative navigation cases,17 exact and17 catalog-origin references,
+dirty/restart/exit checks, four configured-PHP route/view cases,121 Laravel13.37
+syntax files,387 runtime assertions and exactly three intentional diagnostics.
+All23 controlled browser flows pass. Source235 workspace5635/265ignored/same11
+explicit HTTP/direnv exclusions and workspace all-target Clippy remain explicitly
+reused; unchanged191 source226 engine corpus/provenance remains separate.
+
+App121 was kept recoverable throughout acceptance, then removed. Only App122 and
+the latest seven235 regression executables remain. Compiler/staging output was
+removed (13717 files, 8.6GiB total); frontend dist removal:73,749,818
+bytes. Source pins, licenses, WIT, settings/profile conventions, both stashes and
+the disabled updater remain intact. The main app was not launched or installed;
+native menus/focus/shortcuts/undo/relaunch/recovery and real platform/service
+checks remain user-skipped or unverified. Closed non-PHP graph/config freshness,
+large-project guard cost/cancellation, existing-target initial SaveAs, provider
+and custom catalog-root first-save, Eloquent first-response/navigation corpus
+and the remaining roadmap remain open. No debugger expansion, migration,
+notarization, public release or updater activation is added. All69 areas retain
+67partial/two debugger-deferred states. Evidence:artifacts/checks/slice236/
+{pipeline,compiler-witness,client-host,embedded,post-package,reused-evidence}.json
+and artifacts/batches/0.1.122/{build-receipt,retention}.json.
+
+Before-commit formatting slice 235 (source accepted; packaged by236):
 FEAT-001/018/066/069: the old headless formatter accepted edits from an older
 buffer. A held real LSP reply inserted spaces into a newly typed PHP string
 literal; actual Host apply/save persisted that corrupted literal. The unchanged
@@ -60,7 +111,7 @@ is promoted: all 69 areas remain 67 partial/two debugger user-deferred. Evidence
 artifacts/checks/slice235/{baseline,review,gates,evaluation,frozen-runtimes,
 retention,retained-runtime-lists,acceptance}.json and the retained failure logs.
 
-Formatter freshness slice 234 (frontend source accepted; not packaged):
+Formatter freshness slice 234 (source accepted; packaged by236):
 FEAT-018/066: a delayed formatter response applied edits after the editor's path,
 document identity or read-only metadata changed while its Text object stayed the
 same. The tracked regression reproduces six failures and four controls across

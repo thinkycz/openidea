@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 242 (local development App 0.1.125 accepted):
+Promote exact accepted signed PHPantom195 and package source241 concrete Eloquent
+member precedence plus upstream f473cd992. Matching resources, source pin and
+active resource provenance verify; historical candidate manifests stay inactive.
+Four version and three engine files are the only code/input changes. All 47 local
+lock versions change without third-party updates or released WIT snapshot changes.
+
+Fresh package gates pass: 10 packaging/pruning tests, 24 version/provenance tests,
+15,131 frontend tests / 11 skips, types, lint, formatting, Knip, production frontend
+build/Safari startup, Rust formatting and three bundled-server resource tests plus
+strict resource Clippy. Fresh arm64 native build and actual compiler arguments
+for both application library/executable prove debug assertions off and normal
+application identity. Binary identity witnesses, version and source/build receipts
+verify. Reuse explicitly the exact source241 workspace 5,738 tests / 269 ignored /
+same 11 exclusions and all-target Clippy; engine195 18,754 main tests / 17 ignored /
+two isolated children and both release Clippy modes remain source evidence.
+
+The app's embedded195 passes 142 actual client/Host cases (75 / 67, including all
+52 completion/navigation tests) and three normal formatter Host tests. Physical
+member targets are checked in both first-response orders, across unsaved target
+movement, restart and discard. Broader embedded probes pass 13 positive / seven
+negative navigation cases, 17 exact / 17 catalog-origin references and four
+configured PHP cases. The unchanged Laravel13.37 fixture passes 121 PHP syntax
+checks, 387 runtime assertions and exactly three deliberate diagnostics.
+All 23 selected controlled-browser formatter/Laravel/reformat cases pass.
+These results do not establish native GUI acceptance.
+
+Deep/strict ad-hoc signature verification passes after embedded probes; normal
+app cfg and receipt/source comparisons pass. The main app is not launched,
+installed or notarized. macOS13 is metadata only, with no OS13 runtime test.
+Native GUI remains user-skipped. Existing controlled-browser native API fallback
+and duplicate Markdown toolbar-key warnings, frontend lint/chunk warnings and the
+Darwin unwind-table warning remain recorded; native impact and exception costs
+are unmeasured. A virtual cast property can still navigate to a same-named trait
+method, as reproduced on194/195; this is the next source navigation gap.
+
+Keep App124 through acceptance, then prune it. Only App125 and the current seven
+regression executables remain. Remove compiler/staging output after signing and
+77,380,872 bytes of frontend dist after embedded acceptance.
+Preserve PHP Workbench, canonical sources/engines, provenance, licenses, released
+API snapshots, prior evaluation receipts and both stashes. No updater activation,
+profile migration, public app release or new debugger functionality is performed.
+All 69 areas remain 67 partial / two debugger user-deferred.
+
+Latest app: artifacts/batches/0.1.125/OpenStorm.app.
+Main SHA256: 166214f7d9928ff51e39f69d828f042eb35672a8b3f5a49377e3ae4d48da3b4c.
+Embedded195 SHA256: f8f57f97df709f98ad349232fabe2a9e650fa7ffe069e32a6fc947a7f5f684ad.
+Evidence: artifacts/checks/slice242/{pipeline,source-match,compiler-witness,
+embedded,client-host,post-package}.json; the app's build-receipt.json.
+
 Upstream integration (2026-11-22, upstream `f473cd992`, source acceptance verified):
 Merged 292 commits from l0ng-ai/openidea since `5baaf5b7d`: editor/navigation and
 layout fixes, Git workflows, Python console/refactoring/testing support, remote

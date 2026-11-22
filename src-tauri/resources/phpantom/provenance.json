@@ -1,30 +1,30 @@
 {
-  "version": "0.11.1-openstorm.194",
+  "version": "0.11.1-openstorm.195",
   "platform": "aarch64-apple-darwin",
-  "sha256": "ba8f257433543eab4f20c70a0f2b92eaabcdfbadcb4acd8f0fad7fadd7984f31",
-  "source_artifact": "artifacts/engines/0.11.1-openstorm.194/phpantom_lsp",
+  "sha256": "f8f57f97df709f98ad349232fabe2a9e650fa7ffe069e32a6fc947a7f5f684ad",
+  "source_artifact": "artifacts/engines/0.11.1-openstorm.195/phpantom_lsp",
   "source_recipe": "scripts/prepare-phpantom.py and scripts/build-phpantom.py",
-  "source_tree": "artifacts/phpantom/1756b1f920c1-7087ad9c25b1-verified",
+  "source_tree": "artifacts/phpantom/1756b1f920c1-39f55a79f684-verified",
   "base_openidea_revision": "50212e73972d6f05bf16050cb0ba10102a6c8054",
   "upstream_repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "upstream_commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "source_archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "7087ad9c25b10482c1b33699ff21b2e83b3c1c82d69433eec3e1a1fba5f68b83",
-  "patch_count": 194,
-  "openstorm_source_recipe": "engine/candidates/0.11.1-openstorm.194-source.json; scripts/prepare-phpantom.py; scripts/build-phpantom.py",
+  "patches_sha256": "39f55a79f6840b9671517ba168866cc8b3c0daadff96be1688de2d3547b6a3ad",
+  "patch_count": 195,
+  "openstorm_source_recipe": "engine/candidates/0.11.1-openstorm.195-source.json; scripts/prepare-phpantom.py; scripts/build-phpantom.py",
   "distribution": "local OpenStorm rebuild; not an upstream PHPantom release",
   "previous_released_engine": {
     "version": "0.11.1-workbench.114",
     "sha256": "c520616efb8128814033112e1987574cc429062abc6d063e2d3128b4e69ba436",
     "provenance": "engine/releases/0.11.1-workbench.114.json"
   },
-  "source_build_artifact": "artifacts/phpantom-build-194/release/phpantom_lsp",
+  "source_build_artifact": "artifacts/phpantom-build-195/release/phpantom_lsp",
   "previous_local_candidate": {
-    "version": "0.11.1-openstorm.193",
-    "sha256": "5b6a254415ec5e0a8c2b37dedd4a5ee8a5c4f020a1be87ab9fa4d1059e1ff9cb",
-    "provenance": "engine/candidates/0.11.1-openstorm.193.json"
+    "version": "0.11.1-openstorm.194",
+    "sha256": "ba8f257433543eab4f20c70a0f2b92eaabcdfbadcb4acd8f0fad7fadd7984f31",
+    "provenance": "engine/candidates/0.11.1-openstorm.194.json"
   },
-  "source_build_sha256": "93ef9a9eba34d6ef3ca568004022399265687ba9ed31b652b4ee33ca7de8ca50",
+  "source_build_sha256": "de401621c90ec21bec38debeb66a9a333319ae2471d76988d4152593c3605ff2",
   "signing": "local ad-hoc; codesign --verify --strict passed; not notarized",
   "active": true
 }

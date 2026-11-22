@@ -1,0 +1,387 @@
+--- a/src/definition/member/shape_keys.rs
++++ b/src/definition/member/shape_keys.rs
+@@ -5,6 +5,16 @@
+ //! `$fillable`, etc.) so that go-to-definition can jump to the right
+ //! position in the source file.
+ 
++use mago_syntax::cst::{
++    Expression, Statement,
++    array::ArrayElement,
++    class_like::{
++        member::ClassLikeMember,
++        method::MethodBody,
++        property::{Property, PropertyItem},
++    },
++    node::Node,
++};
+ use tower_lsp::lsp_types::Position;
+ 
+ use crate::Backend;
+@@ -158,7 +168,7 @@
+         None
+     }
+ 
+-    /// Find a string literal entry inside an Eloquent array property.
++    /// Find the effective literal entry in the parsed model, excluding comments.
+     ///
+     /// Searches for `'member_name'` or `"member_name"` inside `$casts`,
+     /// `$dates`, `$attributes`, `$fillable`, `$guarded`, `$hidden`,
+@@ -171,65 +181,149 @@
+         member_name: &str,
+         class_range: Option<(usize, usize)>,
+     ) -> Option<Position> {
+-        let single_pattern = format!("'{member_name}'");
+-        let double_pattern = format!("\"{member_name}\"");
+-        let targets = [
+-            "$casts",
+-            "$dates",
+-            "$attributes",
+-            "$fillable",
+-            "$guarded",
+-            "$hidden",
+-            "$visible",
+-            "$appends",
+-        ];
+-
+-        // Track whether we're inside one of the target property arrays.
+-        let mut in_target_property = false;
+-        let mut byte_offset: usize = 0;
+-
+-        for (line_idx, line) in content.lines().enumerate() {
+-            let line_len = line.len() + 1;
+-            let in_range = match class_range {
+-                Some((start, end)) => byte_offset >= start && byte_offset < end,
+-                None => true,
+-            };
+-            if in_range {
+-                let trimmed = line.trim();
+-                // Detect property declarations for target arrays.
+-                if targets.iter().any(|t| trimmed.contains(t)) {
+-                    in_target_property = true;
+-                }
+-                // Also detect the casts() method body.
+-                if trimmed.contains("function casts(") {
+-                    in_target_property = true;
+-                }
+-
+-                if in_target_property {
+-                    // Look for the member name as a string key.
+-                    if let Some(col) = line.find(&single_pattern) {
+-                        // Position cursor inside the quotes on the first
+-                        // letter of the column name.
+-                        return Some(Position {
+-                            line: line_idx as u32,
+-                            character: line[..col + 1].encode_utf16().count() as u32,
++        crate::parser::with_parsed_program(
++            content,
++            "eloquent_array_definition",
++            |program, source| {
++                eloquent_node_entry(Node::Program(program), source, member_name, class_range)
++                    .map(|offset| crate::text_position::offset_to_position(source, offset))
++            },
++        )
++    }
++}
++
++fn eloquent_node_entry(
++    node: Node<'_, '_>,
++    content: &str,
++    name: &str,
++    class_range: Option<(usize, usize)>,
++) -> Option<usize> {
++    let bounds = match node {
++        Node::Class(c) => Some((
++            c.left_brace.start.offset as usize,
++            c.right_brace.end.offset as usize,
++        )),
++        Node::AnonymousClass(c) => Some((
++            c.left_brace.start.offset as usize,
++            c.right_brace.end.offset as usize,
++        )),
++        Node::Trait(c) => Some((
++            c.left_brace.start.offset as usize,
++            c.right_brace.end.offset as usize,
++        )),
++        Node::Enum(c) => Some((
++            c.left_brace.start.offset as usize,
++            c.right_brace.end.offset as usize,
++        )),
++        _ => None,
++    };
++    if let Some(bounds) = bounds {
++        if class_range.is_none_or(|range| range == bounds) {
++            return eloquent_member_entry(crate::parser::class_like_members(node)?, content, name);
++        }
++        if class_range.is_some_and(|range| range.0 < bounds.0 || range.1 > bounds.1) {
++            return None;
++        }
++    }
++    let mut found = None;
++    node.visit_children(|child| {
++        if found.is_none() {
++            found = eloquent_node_entry(child, content, name, class_range);
++        }
++    });
++    found
++}
++
++fn eloquent_member_entry(
++    members: &[ClassLikeMember<'_>],
++    content: &str,
++    name: &str,
++) -> Option<usize> {
++    let mut property_cast = None;
++    let mut method_cast = None;
++    let mut fallback = None;
++    for member in members {
++        match member {
++            ClassLikeMember::Property(Property::Plain(property)) => {
++                for item in property.items.iter() {
++                    let PropertyItem::Concrete(item) = item else {
++                        continue;
++                    };
++                    let variable = item.variable.name;
++                    if variable == b"$casts" {
++                        property_cast = literal_array_entry(item.value, content, name, true);
++                    } else if [
++                        b"$dates".as_slice(),
++                        b"$attributes",
++                        b"$fillable",
++                        b"$guarded",
++                        b"$hidden",
++                        b"$visible",
++                        b"$appends",
++                    ]
++                    .contains(&variable)
++                    {
++                        fallback = fallback.or_else(|| {
++                            literal_array_entry(
++                                item.value,
++                                content,
++                                name,
++                                variable == b"$attributes",
++                            )
+                         });
+                     }
+-                    if let Some(col) = line.find(&double_pattern) {
+-                        return Some(Position {
+-                            line: line_idx as u32,
+-                            character: line[..col + 1].encode_utf16().count() as u32,
+-                        });
+-                    }
+-
+-                    // A line ending with `];` or just `];` closes the array.
+-                    if trimmed == "];" || trimmed.ends_with("];") {
+-                        in_target_property = false;
+-                    }
+                 }
+             }
+-            byte_offset += line_len;
+-        }
+-        None
+-    }
++            ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(b"casts") => {
++                if let MethodBody::Concrete(body) = &method.body {
++                    method_cast = body
++                        .statements
++                        .iter()
++                        .find_map(|statement| match statement {
++                            Statement::Return(return_) => return_.value,
++                            _ => None,
++                        })
++                        .and_then(|value| literal_array_entry(value, content, name, true));
++                }
++            }
++            _ => {}
++        }
++    }
++    // Laravel merges casts() over $casts regardless of declaration order.
++    method_cast.or(property_cast).or(fallback)
+ }
++
++fn literal_array_entry(
++    expr: &Expression<'_>,
++    content: &str,
++    name: &str,
++    keyed: bool,
++) -> Option<usize> {
++    let elements = crate::parser::array_literal_elements(crate::parser::unwrap_parens(expr))?;
++    let mut found = None;
++    for element in elements.iter() {
++        if matches!(
++            element,
++            ArrayElement::Variadic(_) | ArrayElement::Missing(_)
++        ) {
++            continue;
++        }
++        let literal = if keyed {
++            crate::parser::array_element_key(element)
++        } else {
++            crate::parser::array_element_value(element)
++        };
++        let Some((key, start, _)) = literal.and_then(|value| {
++            crate::virtual_members::laravel::helpers::resolved_string_literal(
++                crate::parser::unwrap_parens(value),
++                content,
++            )
++        }) else {
++            continue;
++        };
++        if key == name && (keyed || found.is_none()) {
++            found = Some(start);
++        }
++    }
++    found
++}
+--- a/src/virtual_members/laravel/model_extraction.rs
++++ b/src/virtual_members/laravel/model_extraction.rs
+@@ -605,7 +605,7 @@
+     else {
+         return Vec::new();
+     };
+-    let mut results = Vec::new();
++    let mut results: Vec<(String, String)> = Vec::new();
+     for element in elements.iter() {
+         let ArrayElement::KeyValue(entry) = element else {
+             continue;
+@@ -624,7 +624,11 @@
+             continue;
+         };
+         if !key.is_empty() && !value.is_empty() {
+-            results.push((key.to_owned(), value));
++            if let Some((_, previous)) = results.iter_mut().find(|(name, _)| name == key) {
++                *previous = value;
++            } else {
++                results.push((key.to_owned(), value));
++            }
+         }
+     }
+     results
+--- a/tests/integration/definition_laravel.rs
++++ b/tests/integration/definition_laravel.rs
+@@ -4694,3 +4694,97 @@
+         }
+     }
+ }
++
++#[tokio::test]
++async fn effective_eloquent_cast_origins_follow_literals_precedence_and_byte_bounds() {
++    let cases = [
++        (
++            "comment",
++            "protected function casts(): array { return [/* 😀 'quality' => 'float' */ /* effective */ 'quality' => 'bool']; }",
++        ),
++        (
++            "method last",
++            "protected $casts = ['quality' => 'float']; protected function casts(): array { return [/* effective */ 'quality' => 'bool']; }",
++        ),
++        (
++            "method first",
++            "protected function casts(): array { return [/* effective */ 'quality' => 'bool']; } protected $casts = ['quality' => 'float'];",
++        ),
++        (
++            "method duplicate",
++            "protected function casts(): array { return ['quality' => 'float', /* effective */ 'quality' => 'bool']; }",
++        ),
++        (
++            "property duplicate",
++            "protected $casts = ['quality' => 'float', /* effective */ 'quality' => 'bool'];",
++        ),
++        (
++            "legacy",
++            "protected function casts(): array { return array(/* effective */ 'quality' => 'bool'); }",
++        ),
++        (
++            "decoded",
++            "protected function casts(): array { return [/* effective */ \"qual\\x69ty\" => \"bool\"]; }",
++        ),
++        (
++            "CRLF",
++            "protected function casts(): array { return [/* effective */ 'quality' => 'bool']; }",
++        ),
++    ];
++    for (label, body) in cases {
++        let preamble = if label == "CRLF" {
++            "// preamble\n".repeat(100)
++        } else {
++            String::new()
++        };
++        let php = format!(
++            "<?php\n{preamble}namespace App\\Models;\nclass Decoy extends \\Illuminate\\Database\\Eloquent\\Model {{ protected $casts = ['quality' => 'float']; }}\nclass User extends \\Illuminate\\Database\\Eloquent\\Model {{\n    {body}\n}}\nclass Other extends \\Illuminate\\Database\\Eloquent\\Model {{ protected $casts = ['quality' => 'string']; }}\n"
++        );
++        let php = if label == "CRLF" {
++            php.replace('\n', "\r\n")
++        } else {
++            php
++        };
++        let caller = "<?php\n$user = new \\App\\Models\\User();\n$user->quality;\n";
++        let (backend, dir) =
++            make_workspace(&[("src/Models/User.php", &php), ("src/Probe.php", caller)]);
++        let response = open_and_goto_definition(&backend, &dir, "src/Probe.php", caller, 2, 8)
++            .await
++            .expect(label);
++        let location = match response {
++            GotoDefinitionResponse::Scalar(location) => location,
++            GotoDefinitionResponse::Array(mut locations) => {
++                assert_eq!(locations.len(), 1, "{label}");
++                locations.pop().unwrap()
++            }
++            other => panic!("{label}: unexpected {other:?}"),
++        };
++        let marker = "/* effective */ ";
++        let prefix = &php[..php.find(marker).unwrap() + marker.len() + 1];
++        let point = Position::new(
++            prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        );
++        assert_eq!(
++            location.uri,
++            Url::from_file_path(dir.path().join("src/Models/User.php")).unwrap(),
++            "{label}"
++        );
++        assert_eq!(location.range, Range::new(point, point), "{label}");
++        let uri = Url::from_file_path(dir.path().join("src/Probe.php")).unwrap();
++        let hover = crate::common::hover_at(&backend, uri.as_str(), caller, 2, 8).expect(label);
++        assert!(
++            crate::common::hover_text(&hover).contains("**var** `bool`"),
++            "{label}: {hover:?}"
++        );
++    }
++    let php = "<?php namespace App\\Models; class User extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = [/* 'quality' => 'bool' */ 'other' => 'bool']; }";
++    let caller = "<?php (new \\App\\Models\\User())->quality;";
++    let (backend, dir) = make_workspace(&[("src/Models/User.php", php), ("src/Probe.php", caller)]);
++    assert!(
++        open_and_goto_definition(&backend, &dir, "src/Probe.php", caller, 0, 35)
++            .await
++            .is_none(),
++        "comment-only key is not a declaration"
++    );
++}
+--- a/tests/integration/parser.rs
++++ b/tests/integration/parser.rs
+@@ -2410,3 +2410,25 @@
+         assert_eq!(sources.method.len(), 2);
+     }
+ }
++
++#[tokio::test]
++async fn effective_eloquent_literal_cast_duplicates_keep_last_runtime_value() {
++    for (open, close) in [("[", "]"), ("array(", ")")] {
++        for declaration in [
++            format!("protected $casts = {open}'quality' => 'float', 'quality' => 'bool'{close};"),
++            format!(
++                "protected function casts(): array {{ return {open}'quality' => 'float', 'quality' => 'bool'{close}; }}"
++            ),
++        ] {
++            let php = format!(
++                "<?php class Bakery extends \\Illuminate\\Database\\Eloquent\\Model {{ {declaration} }}"
++            );
++            let backend = create_test_backend();
++            let classes = backend.parse_php(&php);
++            assert_eq!(
++                classes[0].laravel().unwrap().casts_definitions,
++                vec![("quality".to_owned(), "bool".to_owned())]
++            );
++        }
++    }
++}

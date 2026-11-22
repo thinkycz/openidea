@@ -186,3 +186,114 @@ async fn cast_fields_keep_first_response_types_and_exact_managed_declarations() 
         f.finish(outcome).await;
     }
 }
+
+async fn effective_cast_origin(f: &Fixture, source: &str, label: &str, definition_first: bool) {
+    let position = property(CALLER, "$bakery", "quality").start;
+    let hover = async {
+        let value = ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, position)
+            .await
+            .unwrap()
+            .expect("first hover knows effective cast");
+        assert!(value.contents.value.contains("**var** `bool`"), "{label}: {}", value.contents.value);
+    };
+    let definition = async {
+        let locations =
+            ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition).await.unwrap();
+        assert_eq!(locations.len(), 1, "{label}: {locations:?}");
+        assert_eq!(*locations[0].path, f.root.join("app/Models/Bakery.php"));
+        assert!(locations[0].uri.is_none());
+        let marker = "/* effective */ ";
+        let key = source.find(marker).unwrap() + marker.len() + 1;
+        let expected = at(source, key);
+        assert_eq!(locations[0].range, Range::new(expected, expected), "{label}: effective cast key");
+    };
+    if definition_first {
+        definition.await;
+        hover.await;
+    } else {
+        hover.await;
+        definition.await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, owned PHP and Laravel 13.37 vendor fixture"]
+async fn cast_definitions_select_effective_literal_entries_without_text_matches() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor fixture"))
+        .canonicalize()
+        .unwrap();
+    let variants = [
+        (
+            "comment key",
+            "protected function casts(): array { return [/* 😀 'quality' => 'float', */ /* effective */ 'quality' => 'bool']; }",
+        ),
+        (
+            "method overrides property",
+            "protected $casts = ['quality' => 'float'];\n    protected function casts(): array { return [/* effective */ 'quality' => 'bool']; }",
+        ),
+        (
+            "last duplicate key",
+            "protected function casts(): array { return ['quality' => 'float', /* effective */ 'quality' => 'bool']; }",
+        ),
+        ("CRLF class bounds", "protected function casts(): array { return [/* effective */ 'quality' => 'bool']; }"),
+        ("decoded key", "protected function casts(): array { return [/* effective */ \"qual\\x69ty\" => \"bool\"]; }"),
+        ("legacy array", "protected function casts(): array { return array(/* effective */ 'quality' => 'bool'); }"),
+    ];
+    let sources: Vec<_> = variants
+        .iter()
+        .map(|(label, body)| {
+            let preamble = if *label == "CRLF class bounds" { "// preamble\n".repeat(100) } else { String::new() };
+            let source = format!(
+                "<?php\n{preamble}namespace App\\Models;\nclass Bakery extends \\Illuminate\\Database\\Eloquent\\Model {{\n    {body}\n}}\n"
+            );
+            let source = if *label == "CRLF class bounds" { source.replace('\n', "\r\n") } else { source };
+            Fixture::lint(&source);
+            (*label, source)
+        })
+        .collect();
+    for definition_first in [false, true] {
+        let extra = vec![
+            (
+                "composer.json".into(),
+                r#"{"require":{"php":"^8.3","laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#
+                    .into(),
+            ),
+            ("app/Models/Bakery.php".into(), sources[3].1.clone()),
+            ("app/Foreign.php".into(), FOREIGN.into()),
+        ];
+        let (f, ()) = Fixture::new_at_with_fixture_setup(
+            CALLER,
+            &extra,
+            "app/Probe.php",
+            |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+            |_, _| (),
+        );
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let path = f.root.join("app/Models/Bakery.php");
+            assert!(f.project.documents.by_path(&path).is_none());
+            effective_cast_origin(&f, &sources[3].1, "closed CRLF", definition_first).await;
+            assert!(f.project.documents.by_path(&path).is_none(), "raw disk target stays unmanaged");
+            let model = ide_host::ops::doc::doc_open(&f.host, "main", path.clone()).await.unwrap();
+            for (label, source) in &sources {
+                f.project.documents.replace_all(model.id, source).unwrap();
+                effective_cast_origin(&f, source, label, definition_first).await;
+                assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, CALLER);
+                // Managed buffers use LF; the closed target above retains raw CRLF bytes.
+                assert_eq!(f.project.documents.snapshot(model.id).unwrap().text, source.replace("\r\n", "\n"));
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), sources[3].1);
+            }
+            let negative = sources[0].1.replace("'quality' => 'bool'", "'other' => 'bool'");
+            f.project.documents.replace_all(model.id, &negative).unwrap();
+            removed(&f, f.doc, CALLER, "quality").await;
+            let server = f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+            ide_host::ops::lsp::lsp_restart(&f.host, "main", server).await.unwrap();
+            removed(&f, f.doc, CALLER, "quality").await;
+            ide_host::ops::doc::doc_close(&f.host, "main", model.id).await.unwrap();
+            effective_cast_origin(&f, &sources[3].1, "discard restores closed CRLF", definition_first).await;
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), sources[3].1);
+        })
+        .catch_unwind()
+        .await;
+        f.finish(outcome).await;
+    }
+}

@@ -15,6 +15,61 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Eloquent origin slice 239 (inactive signed194 accepted):
+Actual embedded193 protocol probes reproduce four failures: a cast definition
+inside a comment, a method cast navigating to its overridden property, duplicate
+literal keys using the first type/origin, and no target after a CRLF preamble.
+Actual Host regressions independently reproduce the comment column55 instead
+of96 and an empty closed-CRLF definition. The fixture distinguishes raw closed
+CRLF disk text from managed buffers' normal LF representation.
+
+Patch0194 selects parsed literal entries within exact class byte bounds, with
+casts() over $casts and the last duplicate literal cast value. It decodes literal
+keys, ignores comment text and keeps the existing non-cast array fallbacks.
+No public protocol/settings/client interface changes. Both focused engine tests
+pass across precedence order,duplicate property/method keys,short/legacy arrays,
+decoded keys,Unicode,CRLF,sibling-class isolation and comment-only negatives.
+Engine194 passes18,752release tests/17existing ignores/two isolated child groups,
+both all-target Clippy modes,formatting,fingerprint,production build,arm64/version,
+checksum and strict ad-hoc signing. Its signed SHA256 is
+ba8f257433543eab4f20c70a0f2b92eaabcdfbadcb4acd8f0fad7fadd7984f31.
+Pinned source acquisition/build,upstream attribution and licenses are preserved.
+
+The new actual Host regression passes twice on final signed194,standalone and
+in the full corpus. Both first-request orders cover initial unmanaged CRLF,six
+managed variants,exact physical UTF-16 targets,an unchanged caller,decoded/legacy
+keys,comment-only refusal before/after restart,discard back to raw CRLF and
+unchanged model disk bytes. The original237cast freshness regression also passes.
+No result retries,sleeps,caller edits or loose range checks hide either failure.
+Fourteen PHP fixture variants pass syntax lint;three actual Laravel13.37 Model
+runtime cases independently confirm duplicate/method precedence. A same-root
+193-to194 engine handoff with unchanged project/config/cache inputs changes old
+float/no-origin to bool/the exact effective key;both owned processes exit. Its
+initial harness assumed193 returned a location and hit null;the corrected harness
+accepts the old negative control while194still must return exact type and target.
+This is engine protocol evidence,not native application upgrade acceptance.
+
+Fresh workspace formatting/all-target Clippy and5,635Rust tests pass with267opt-in
+ignores and the same11exclusions. Actual signed194 passes141client/Host cases
+(75+66;completion/navigation51),plus three normal Host formatter regressions/
+84primary scenarios in the workspace run. Nineteen provenance tests and actual
+candidate/default checksum/source verification pass. Exact unchanged238frontend
+source explicitly reuses14,680tests/eight skips,types,lint,format,Knip,build and
+23controlled browser cases. Native GUI remains user-skipped.
+
+Only App0.1.123/default193 remain packaged and unchanged;194is inactive/unbundled.
+Latest seven regression executables replace the previous set and pass post-cleanup
+launch/list checks. Owned compiler output removed30.1GiBworkspace plus2.2GiBengine;
+scratch sources removed. Canonical source/provenance/evaluation evidence,Workbench,
+licenses,WIT and both stashes remain. No new app build for this source slice.
+Broader inheritance,real-member precedence,schema-only declarations,dynamic/unpacked
+casts,large-model deduplication/AST parsing cost,UI/platform and wider Eloquent
+acceptance remain open. No whole-area promotion:67partial/two debugger-deferred.
+Promote/package194 in a separate slice after this source checkpoint is pushed.
+Evidence:artifacts/checks/slice239/{acceptance,reproduction,focused,closed-red,
+engine-gates,engine-summary,candidate-focused,evaluation,upgrade-probe,gates,
+frontend-reuse,retention,engine-retention}.json;0194patch and Host fixture.
+
 Package slice 238 (local development App123 accepted):
 OpenStorm0.1.123 promotes signed PHPantom193 and packages source237's commented
 Eloquent cast inference and UTF-16 physical declaration fixes. Engine/source.json

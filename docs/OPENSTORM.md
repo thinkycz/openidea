@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream integration (76d67145f; automated source acceptance verified):
+Merge 45 commits after c209e189e: Git workflows, npm scripts, Biome/Stylelint/
+Tailwind support, editor fixes and URL dependency pins. Keep OpenStorm 0.1.127,
+PHPantom 197 default, overwrite consent, .openidea compatibility and source247's
+accepted inactive/unbundled 198. App127 remains the sole accepted packaged app
+and predates this merge. No app installation, packaging or real deployment runs.
+
+Resolve twelve content conflicts and regenerate bindings/the command snapshot
+from Rust. Retain PHP rename preparation, guarded format plans and every revision
+witness, project/settings freshness and reviewed workspace undo with upstream's
+new staged/partial-file commit workflows. Share reviewed history in new attached
+views; a focused regression reproduces attachment API undo bypassing the guarded
+restore, then passes through reviewed wrappers. Keyboard/Edit-menu controls pass.
+New worktree UI labels use OpenStorm; new Gradle/JDT LS caches use openstorm.
+Existing project paths and user configuration stay unchanged. Defer the incoming
+exception-breakpoint intention and its extension subsystem, retaining existing
+debugger fixes and both debugger area statuses.
+
+Fresh corrected-source gates pass 5,897 Rust tests / 274 ignored /
+13 filtered (the existing 11 exclusions plus two new environment-file
+worktree tests awaiting authorization), strict all-target workspace Clippy and
+formatting. Both Rust exporter tests regenerate the derived interfaces. The
+pre-cache-correction full Rust pass is retained separately and does not replace
+the corrected-source acceptance. Frontend gates pass 15,436 tests /
+11 skips, types/lint/format/Knip, production build and Safari startup checks.
+All 145 actual PHPantom 198 client/Host cases pass (75/70), plus three normal
+formatter tests. Candidate198 stays inactive/unbundled; default197 resources,
+source247 inputs and all 53 preservation witnesses stay unchanged.
+
+All 111 selected controlled-browser cases pass across editor, tab close,
+code insight, Laravel navigation, formatter/reformat, commit inclusion/checks,
+worktree layout, Git undo and npm scripts. Native GUI checks remain user-skipped.
+Browser stubs do not establish real npm/linter/Tailwind server or OS acceptance.
+The first frontend run retains two stale-catalog failures from three deferred
+exception labels (removed) and two unchanged browser-close deadline failures;
+the separate three-case and final full reruns pass without relaxed deadlines.
+The transient close failure's cause remains unproven; no product fix is claimed.
+Inherited build/chunk/browser fallback warnings remain in the logs.
+
+Remove owned compiler and dist output after acceptance; retain only App127 and
+the latest seven regression executables. Preserve Workbench, earlier evaluation
+and provenance/license evidence, canonical engines and both original stashes.
+All 69 areas remain 67 partial / two debugger user-deferred. The two synthetic-env
+worktree tests remain unrun under the environment-file guard;no environment
+file changes are included in the merge. Commit/push identity and remote read-back
+are recorded in the delivery receipt.
+Evidence: artifacts/checks/upstream-76d67145f/{resolution,rust-gates,frontend,
+after-rust,evaluation,retention,delivery}.json.
+
 Source slice 247 (accepted source; accessor aliases):
 PHPantom198 synthesizes accessor properties for canonical/camel and known declared
 attribute spellings. Legacy getters win over modern Attribute getters regardless

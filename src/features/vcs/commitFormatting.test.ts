@@ -1,9 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
-import type { DocumentInfo, ProjectInfo, Settings, WorkspaceEdit } from "@/bindings";
+import type { DocumentInfo, FileStatus, ProjectInfo, Settings, WorkspaceEdit } from "@/bindings";
 import * as ipc from "@/platform/ipc";
 import { useProject } from "@/platform/project";
 import { maybeEditorService } from "@/workbench/contributions";
-import { runCommitChecks } from "./commitChecks";
+import { runCommitModifications } from "./commitChecks";
 import { useVcs } from "./store";
 
 vi.mock("@/workbench/contributions", async (original) => ({
@@ -28,7 +28,17 @@ const info = {
   text: "<?php /* 😀 */  echo 1;\n",
   readOnly: false,
 } as DocumentInfo;
-const files = [{ path: info.path, exists: true }];
+const files: FileStatus[] = [
+  { path: info.path, relPath: "a.php", staged: null, unstaged: "modified", renamedFrom: null },
+];
+const selection = async () => ({
+  revision: 1,
+  message: "Format PHP",
+  amend: false,
+  repositories: [
+    { root: "/repo", options: { amend: false, author: null, signOff: false, runHooks: true, stage: [info.path] } },
+  ],
+});
 
 function setup() {
   useProject.setState({
@@ -45,6 +55,10 @@ function setup() {
   useVcs.setState({ root: "/repo", repo: "/repo", status: [], branch: null });
   vi.spyOn(ipc, "isTauri").mockReturnValue(true);
   vi.spyOn(ipc.commands, "docOpen").mockResolvedValue(ok(info));
+  vi.spyOn(ipc.commands, "vcsFileAt").mockResolvedValue(ok("<?php echo 0;\n"));
+  vi.spyOn(ipc.commands, "vcsDiffHunks").mockResolvedValue([
+    { start: 0, lines: 20, oldStart: 0, oldLines: 1, oldText: "<?php echo 0;\n", kind: "modified" },
+  ]);
   const snapshot = vi.spyOn(ipc.commands, "docSnapshot").mockResolvedValue(ok(info));
   const save = vi.spyOn(ipc.commands, "docSave").mockResolvedValue(ok(null));
   const close = vi.spyOn(ipc.commands, "docClose").mockResolvedValue(ok(null));
@@ -91,7 +105,7 @@ function setup() {
 
 it("keeps the original input version and every host witness through before-commit formatting", async () => {
   const f = setup();
-  const pending = runCommitChecks(files, false);
+  const pending = runCommitModifications(files, selection);
   await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce());
   expect(f.request).toHaveBeenCalledWith(info.id, info.version, info.path, { tabSize: 4, insertSpaces: true });
   f.release();
@@ -99,14 +113,14 @@ it("keeps the original input version and every host witness through before-commi
   expect(f.apply).toHaveBeenCalledWith(f.plan);
   expect(f.save).toHaveBeenCalledWith(info.id);
   expect(f.close).toHaveBeenCalledWith(info.id);
-  expect(f.saveAll).toHaveBeenCalledOnce();
+  expect(f.saveAll).not.toHaveBeenCalled();
 });
 
 it.each(["project", "settings", "opening", "openingPath", "lightEdit"] as const)(
   "retires the pending operation after %s changes",
   async (change) => {
     const f = setup();
-    const pending = runCommitChecks(files, false);
+    const pending = runCommitModifications(files, selection);
     await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce());
     if (change === "project") useProject.setState({ project: { root: "/other" } as ProjectInfo });
     if (change === "settings") useProject.setState({ settings: { ...useProject.getState().settings! } });
@@ -126,7 +140,7 @@ it.each(["plan", "apply"])("preserves the buffer when the host refuses a stale %
   const f = setup();
   if (stage === "apply")
     f.apply.mockResolvedValue({ status: "error", error: { kind: "outOfSync", message: "Changed input" } });
-  const pending = runCommitChecks(files, false);
+  const pending = runCommitModifications(files, selection);
   await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce());
   if (stage === "plan") f.release({ status: "error", error: { kind: "outOfSync", message: "Changed input" } });
   else f.release();
@@ -154,7 +168,7 @@ it("filters protected regions without dropping revision witnesses", async () => 
       ],
     },
   ];
-  const pending = runCommitChecks(files, false);
+  const pending = runCommitModifications(files, selection);
   await vi.waitFor(() => expect(f.request).toHaveBeenCalledOnce());
   f.release();
   await pending;
@@ -178,7 +192,7 @@ it.each(["open", "snapshot"])("does not dispatch formatting after a project swit
         release = resolve;
       }),
   );
-  const pending = runCommitChecks(files, false);
+  const pending = runCommitModifications(files, selection);
   await vi.waitFor(() => expect(held).toHaveBeenCalledOnce());
   useProject.setState({ project: { root: "/other" } as ProjectInfo });
   release(ok(info));

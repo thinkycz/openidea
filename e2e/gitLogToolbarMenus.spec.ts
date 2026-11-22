@@ -112,6 +112,57 @@ test("Git Log separates commit message typography from compact metadata", async 
   await expect(author).toHaveCSS("font-size", "12px");
 });
 
+test("compact Git Log refs give the subject room on either side", async ({ workbench: page }) => {
+  await page.setViewportSize({ width: 630, height: 720 });
+  const refSubject = "Reconcile shipping credits";
+  const longReference = "release-quarterly-settlement-and-backoffice-invoice-reconciliation";
+  await page.evaluate(
+    async ({ refSubject, longReference }) => {
+      const optionsModule = "/src/features/vcs/logOptions.ts";
+      const logModule = "/src/features/vcs/logStore.ts";
+      const { setLogOptions } = await import(/* @vite-ignore */ optionsModule);
+      const { useGitLog } = await import(/* @vite-ignore */ logModule);
+      setLogOptions({ showBranches: false, showDetails: false });
+      const [first, ...rest] = useGitLog.getState().commits;
+      useGitLog.setState({
+        commits: [{ ...first, summary: refSubject, message: refSubject, refs: [longReference] }, ...rest],
+      });
+    },
+    { refSubject, longReference },
+  );
+  const row = page.getByRole("listbox", { name: "Commits" }).getByRole("option").filter({ hasText: refSubject });
+  const subject = row.getByText(refSubject, { exact: true });
+  const ref = row.getByTitle(longReference, { exact: true });
+  const expectLayout = async () => {
+    await expect
+      .poll(() =>
+        subject.evaluate((el) => {
+          const text = document.createRange();
+          text.selectNodeContents(el);
+          return el.getBoundingClientRect().width + 0.02 >= text.getBoundingClientRect().width;
+        }),
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        ref.evaluate((el) => {
+          const refs = el.parentElement!;
+          return refs.clientWidth / refs.parentElement!.clientWidth;
+        }),
+      )
+      .toBeLessThanOrEqual(0.34);
+    await expect(ref).toHaveCSS("font-size", "12px");
+    await expect(subject).toHaveCSS("font-size", "13px");
+  };
+  await expectLayout();
+  await expect.poll(async () => (await subject.boundingBox())!.x < (await ref.boundingBox())!.x).toBe(true);
+
+  await page.getByRole("toolbar", { name: "Log filters" }).getByRole("button", { name: "View Options" }).click();
+  await page.getByRole("menuitemcheckbox", { name: "References on the Left" }).click();
+  await expectLayout();
+  await expect.poll(async () => (await subject.boundingBox())!.x > (await ref.boundingBox())!.x).toBe(true);
+});
+
 test("a second click on a Git Log toolbar button closes its popup", async ({ workbench: page }) => {
   const toolbar = page.getByRole("toolbar", { name: "Log filters" });
   const branchPopup = page.getByRole("dialog", { name: "Filter by Branch" });
@@ -172,6 +223,50 @@ test("Git Log keeps filters and actions inside the commit pane at the minimum wi
   await page.keyboard.press("Escape");
   await toolbar.getByRole("button", { name: "More Filters" }).click();
   await expect(page.getByRole("menuitem", { name: "Paths" })).toBeVisible();
+});
+
+test("long Git Log filter values shorten inside their buttons", async ({ workbench: page }) => {
+  const branchName = "feature/quarterly-settlement-and-backoffice-invoice-reconciliation";
+  await page.setViewportSize({ width: 1120, height: 720 });
+  await page.evaluate(async (branch) => {
+    const logModule = "/src/features/vcs/logStore.ts";
+    const optionsModule = "/src/features/vcs/logOptions.ts";
+    const { setLogBranches } = await import(/* @vite-ignore */ logModule);
+    const { setLogOptions } = await import(/* @vite-ignore */ optionsModule);
+    setLogOptions({ showBranches: false, showDetails: false });
+    setLogBranches([branch]);
+  }, branchName);
+
+  const toolbar = page.getByRole("toolbar", { name: "Log filters" });
+  const branch = toolbar.getByRole("button", { name: `Branch: ${branchName}`, exact: true });
+  const value = branch.getByText(branchName, { exact: true });
+  const clear = toolbar.getByRole("button", { name: "Clear Branch filter", exact: true });
+  for (const width of [1120, 620]) {
+    await page.setViewportSize({ width, height: 720 });
+    await expect(branch).toBeVisible();
+    await expect(value).toHaveCSS("text-overflow", "ellipsis");
+    expect(
+      await value.evaluate((label) => {
+        const bounds = label.getBoundingClientRect();
+        const button = label.closest("button")!.getBoundingClientRect();
+        return label.scrollWidth > label.clientWidth && bounds.width > 0 && bounds.right <= button.right;
+      }),
+    ).toBe(true);
+    await expect(branch).toHaveAttribute("title", branchName);
+    await clear.click({ trial: true });
+  }
+
+  await page.setViewportSize({ width: 400, height: 560 });
+  // The overflow is measured after the resize: open the menu once the filter has moved into it.
+  await expect(branch).toBeHidden();
+  await toolbar.getByRole("button", { name: "More Filters" }).click();
+  await expect(page.getByRole("menuitem", { name: `Branch: ${branchName}`, exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.setViewportSize({ width: 620, height: 720 });
+  await clear.click();
+  await expect(toolbar.getByRole("button", { name: "Branch", exact: true })).toBeVisible();
+  await expect(clear).toBeHidden();
 });
 
 test("Git Log puts affected changes on the changed-files toolbar and groups preview options", async ({
@@ -240,6 +335,35 @@ test("Git Log puts affected changes on the changed-files toolbar and groups prev
   await commit.click();
   await expect(affected).toHaveCount(0);
   await expect(notes).toBeVisible();
+});
+
+test("Not Cherry-Picked Commits dims other rows while keeping unpicked commits readable", async ({
+  workbench: page,
+}) => {
+  await page.evaluate(async () => {
+    window.__ipc.handlers.vcs_not_cherry_picked = () => ["0".repeat(40)];
+    const logModule = "/src/features/vcs/logStore.ts";
+    const { setLogBranches } = await import(/* @vite-ignore */ logModule);
+    setLogBranches(["release"]);
+  });
+  const rows = page.getByRole("listbox", { name: "Commits" });
+  const waiting = rows.getByText("Commit 0", { exact: true });
+  const picked = rows.getByText("Commit 1", { exact: true });
+  const color = await waiting.evaluate((el) => getComputedStyle(el).color);
+  await expect(picked).toHaveCSS("color", color);
+
+  const view = page.getByRole("button", { name: "View Options", exact: true });
+  const highlight = page.getByRole("menuitemcheckbox", { name: "Not Cherry-Picked Commits" });
+  await view.click();
+  await expect(highlight).toHaveAttribute("aria-checked", "false");
+  await highlight.click();
+  await expect(picked).not.toHaveCSS("color", color);
+  await expect(waiting).toHaveCSS("color", color);
+
+  await view.click();
+  await expect(highlight).toHaveAttribute("aria-checked", "true");
+  await highlight.click();
+  await expect(picked).toHaveCSS("color", color);
 });
 
 test("the Paths filter replaces the repository filter and can be cleared from overflow", async ({
@@ -319,4 +443,89 @@ test("the Paths filter replaces the repository filter and can be cleared from ov
   await picker.getByRole("textbox", { name: "Paths" }).fill("acme-api/api.ts");
   await picker.getByRole("button", { name: "OK" }).click();
   await expect(firstCommit.getByText("Commit 1", { exact: true })).toBeVisible();
+});
+
+test("the Git Log path tree resizes and keeps selected paths reachable in a short window", async ({
+  workbench: page,
+}) => {
+  await page.setViewportSize({ width: 1000, height: 720 });
+  const longName = "reconcile-invoices-and-export-the-complete-quarterly-settlement-audit.ts";
+  await page.evaluate(async (longName) => {
+    const logPath = "/src/features/vcs/logStore.ts";
+    const optionsPath = "/src/features/vcs/logOptions.ts";
+    const { setLogFilters } = await import(/* @vite-ignore */ logPath);
+    const { setLogOptions } = await import(/* @vite-ignore */ optionsPath);
+    const root = "/dev/acme-api";
+    const selected = Array.from({ length: 9 }, (_, i) => `entry-${i + 1}.ts`);
+    const entry = (name: string, kind: "dir" | "file") => ({
+      name,
+      path: `${root}/${name}`,
+      kind,
+      size: 0,
+      mtimeMs: 0,
+    });
+    window.__ipc.handlers.fs_read_dir = ({ path }) =>
+      path === root
+        ? [entry("src", "dir"), entry(longName, "file"), ...selected.map((name) => entry(name, "file"))]
+        : [];
+    setLogOptions({ showBranches: false, showDetails: false });
+    setLogFilters({ paths: selected.map((name) => `${root}/${name}`) });
+  }, longName);
+
+  const toolbar = page.getByRole("toolbar", { name: "Log filters" });
+  const openTree = async () => {
+    await toolbar.getByRole("button", { name: "More Filters" }).click();
+    await page.getByRole("menuitem", { name: /^Paths:/ }).click();
+    await page.getByRole("menuitem", { name: "Select in Tree…" }).click();
+  };
+  await openTree();
+  const dialog = page.getByRole("dialog", { name: "Filter by Paths" });
+  const tree = dialog.getByRole("tree", { name: "Files and folders" });
+  const resize = dialog.locator('[class*="_resizeGrip_"]');
+  await expect(tree).toBeVisible();
+  await expect(resize).toBeVisible();
+  await tree.getByRole("treeitem", { name: "acme-api", exact: true }).locator("[data-tree-toggle]").click();
+  const folder = tree.getByRole("checkbox", { name: "src", exact: true });
+  const file = tree.getByRole("checkbox", { name: longName, exact: true });
+  await expect(folder.locator("xpath=ancestor::label").locator("svg")).toHaveCount(1);
+  const title = file.locator("xpath=ancestor::label").getByTitle(longName);
+  await expect(title).toHaveCSS("font-size", "13px");
+  await expect(title).toHaveCSS("text-overflow", "ellipsis");
+
+  const originalTreeHeight = (await tree.boundingBox())!.height;
+  const grip = (await resize.boundingBox())!;
+  const x = grip.x + grip.width / 2;
+  const y = grip.y + grip.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 30, y + 65, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => (await tree.boundingBox())!.height).toBeGreaterThan(originalTreeHeight + 40);
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await page.setViewportSize({ width: 420, height: 325 });
+  await openTree();
+  await tree.getByRole("treeitem", { name: "acme-api", exact: true }).locator("[data-tree-toggle]").click();
+  const selected = dialog.getByRole("group", { name: "Selected paths" });
+  await expect(selected).toBeVisible();
+  await expect.poll(() => selected.evaluate((node) => node.scrollHeight - node.clientHeight)).toBeGreaterThan(1);
+  await expect
+    .poll(() => dialog.locator("[data-dialog-body]").evaluate((node) => node.scrollHeight - node.clientHeight))
+    .toBeLessThanOrEqual(1);
+  await expect.poll(() => title.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeGreaterThan(1);
+  const removed = selected.getByRole("checkbox", { name: "acme-api/entry-9.ts", exact: true });
+  await removed.click();
+  await expect(removed).toHaveCount(0);
+  await file.check();
+  await expect(selected.getByRole("checkbox", { name: `acme-api/${longName}`, exact: true })).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "OK" })).toBeInViewport({ ratio: 1 });
+  await dialog.getByRole("button", { name: "OK" }).click();
+  await expect(dialog).toBeHidden();
+  const applied = await page.evaluate(async () => {
+    const path = "/src/features/vcs/logStore.ts";
+    const { useGitLog } = await import(/* @vite-ignore */ path);
+    return useGitLog.getState().filters.paths;
+  });
+  expect(applied).toContain(`/dev/acme-api/${longName}`);
+  expect(applied).not.toContain("/dev/acme-api/entry-9.ts");
 });

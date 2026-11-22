@@ -355,6 +355,11 @@ impl SettingsStore {
         self.effective.read().clone()
     }
 
+    /// Reads part of the effective settings without copying all of them.
+    pub fn read_effective<T>(&self, read: impl FnOnce(&Settings) -> T) -> T {
+        read(&self.effective.read())
+    }
+
     /// Settings defined in `scope`'s file alone (without merging the other layer).
     pub fn layer(&self, scope: SettingsScope) -> Settings {
         let mut merged = defaults_json();
@@ -930,6 +935,7 @@ mod tests {
                 "nonModal": true,
                 "clearInitialMessage": false,
                 "analyzeCode": true,
+                "postponeSlowChecks": true,
                 "checkTodo": true,
                 "reformat": false,
                 "optimizeImports": false,
@@ -944,6 +950,7 @@ mod tests {
                 "disabledPluginChecks": [],
                 "doubleClickOpensDiff": null,
                 "includeChangesByDefault": true,
+                "commitAllWhenNothingStaged": true,
                 "agentInstructions": "",
                 "agent": "",
                 "agentModel": "",
@@ -997,13 +1004,17 @@ mod tests {
     }
 
     #[test]
-    fn commit_default_inclusion_persists() {
+    fn commit_inclusion_options_persist() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SettingsStore::load(tmp.path(), None);
         assert!(store.effective().vcs.commit.include_changes_by_default);
         let settings = store.set(SettingsScope::Global, "vcs.commit.includeChangesByDefault", json!(false)).unwrap();
         assert!(!settings.vcs.commit.include_changes_by_default);
-        assert!(!SettingsStore::load(tmp.path(), None).effective().vcs.commit.include_changes_by_default);
+        assert!(settings.vcs.commit.commit_all_when_nothing_staged);
+        store.set(SettingsScope::Global, "vcs.commit.commitAllWhenNothingStaged", json!(false)).unwrap();
+        let reloaded = SettingsStore::load(tmp.path(), None).effective();
+        assert!(!reloaded.vcs.commit.include_changes_by_default);
+        assert!(!reloaded.vcs.commit.commit_all_when_nothing_staged);
     }
 
     #[test]

@@ -40,6 +40,25 @@ function setup(files: Record<string, string>, settings: Settings = {}) {
 afterEach(() => useDocMeta.setState({}, true));
 
 describe("attached document views (editable diff side)", () => {
+  it("edits and saves through an attachment before it mounts a view", async () => {
+    const { backend, manager } = setup({ "/p/a.txt": "one\ntwo\n" });
+    const att = await attachDocument(manager, "/p/a.txt");
+    const observer = await attachDocument(manager, "/p/a.txt");
+    const view = new EditorView({ doc: observer.text(), extensions: [observer.extension] });
+    try {
+      att.edit({ from: 4, to: 7, insert: "three" }, "revert");
+      expect(att.text()).toBe("one\nthree\n");
+      expect(view.state.doc.toString()).toBe("one\nthree\n");
+      await att.save({ exact: true });
+      expect(backend.docs.get(att.doc)?.saved).toBe("one\nthree\n");
+    } finally {
+      view.destroy();
+      observer.release();
+      att.release();
+      manager.stop();
+    }
+  });
+
   it.each([
     { autoSave: true, tabOpen: false, ensureFinalNewline: false },
     { autoSave: false, tabOpen: false, ensureFinalNewline: false },
@@ -357,3 +376,38 @@ it("keeps reviewed text and undo markers in a temporarily unmounted attachment",
     manager.stop();
   }
 });
+
+it.each(["keyboard", "native", "attachment"] as const)(
+  "routes %s undo in a shared attachment through the primary tab's reviewed history",
+  async (input) => {
+    const { backend, manager } = setup({ "/p/shared.php": "Old" });
+    const att = await attachDocument(manager, "/p/shared.php", { sharedHistory: true });
+    const model = manager.get("/p/shared.php")!;
+    const tab = new EditorSlot(model, "shared-tab", host);
+    const view = new EditorView({ doc: att.text(), extensions: [att.extension], parent: document.body });
+    try {
+      backend.restoreReviewed = vi.fn(async () => {});
+      backend.patch(att.doc, [{ from: 0, to: 3, insert: "New" }], true, { group: "shared", action: "apply" });
+      expect(tab.currentState().doc.toString()).toBe("New");
+      if (input === "attachment") expect(att.undo()).toBe(true);
+      else if (input === "native") {
+        const event = new InputEvent("beforeinput", { inputType: "historyUndo", bubbles: true, cancelable: true });
+        view.contentDOM.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      } else {
+        const { runScopeHandlers } = await import("@codemirror/view");
+        const event = new KeyboardEvent("keydown", { key: "z", ctrlKey: true });
+        expect(runScopeHandlers(view, event, "editor")).toBe(true);
+      }
+      await settle();
+      expect(backend.restoreReviewed).toHaveBeenCalledExactlyOnceWith("shared", false);
+      expect(tab.currentState().doc.toString()).toBe("New");
+      expect(view.state.doc.toString()).toBe("New");
+    } finally {
+      view.destroy();
+      att.release();
+      tab.dispose();
+      manager.stop();
+    }
+  },
+);

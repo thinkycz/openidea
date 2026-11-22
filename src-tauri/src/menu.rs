@@ -675,6 +675,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("vcs.update", "Update Project…"),
             act("vcs.pull", "Pull…"),
             act("vcs.fetch", "Fetch"),
+            act("vcs.unshallow", "Fetch Full History"),
             SEP,
             // Operation items (Abort Merge, Continue Rebase…) are enabled only while it is in progress.
             act("vcs.merge", "Merge…"),
@@ -710,6 +711,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
                     act("vcs.shelve", "Shelve Changes…"),
                     act("vcs.showShelf", "Show Shelf"),
                     act("vcs.stash", "Stash Changes…"),
+                    act("vcs.showStashes", "Show Stash"),
                     act("vcs.unstash", "Unstash Changes…"),
                     act("vcs.rollback", "Rollback…"),
                 ],
@@ -2457,6 +2459,7 @@ mod tests {
                 "vcs.update",
                 "vcs.pull",
                 "vcs.fetch",
+                "vcs.unshallow",
                 "|",
                 "vcs.merge",
                 "vcs.merge.abort",

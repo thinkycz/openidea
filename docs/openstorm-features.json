@@ -916,7 +916,9 @@
       "milestone": 6,
       "status": "partial",
       "acceptance_gate": "Dirty-buffer-aware diff, hunk staging, conflict editor and navigation",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "Upstream76d67145f source merge:45commits afterc209;Gitworkflows/npm/Biome/Stylelint/Tailwind/editorfixes/URLpins. Retain reviewedformatwitnesses/project/settings guards,sharedreviewedhistory,OpenStormidentity/separateGradle/JDTLScaches,andnewworktreelabels;.openidea stayscompatible. Defer incomingexception-breakpoint expansion;existingdebuggerfixesretained. Three history regressions expose attachmentAPIundo bypass;reviewedwrappersfix it. BothRustexporterstests regeneratebindings/snapshot. Fresh5897Rust/274ignored/13filtered(all11legacyplus2pendingenvfixtures),strictworkspaceClippy/format,15436frontend/11skips/types/lint/format/Knip/build/Safari,111browserand145realcandidate198clientHost(75/70)+3normalformatterpass. Initial3staleexceptionlabels corrected;2browserclosedeadlines failfirstfullrun thenpassunchangedisolated/fullrerun;noclockrelaxation orproductfixclaimed. App127/default197unchanged;source247/candidate198preservedandunbundled;onlylatest7testsretained/compilerdistremoved. NativeGUIuser-skipped;realfrontendlanguage-server/platform/performanceand2syntheticenvworktreecasesremainunverified. All69statusesretained."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -956,7 +958,9 @@
       "milestone": 3,
       "status": "partial",
       "acceptance_gate": "Completion/goto/format/rename in supported documents; Vite tasks explicit",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "Upstream76d67145f source merge:45commits afterc209;Gitworkflows/npm/Biome/Stylelint/Tailwind/editorfixes/URLpins. Retain reviewedformatwitnesses/project/settings guards,sharedreviewedhistory,OpenStormidentity/separateGradle/JDTLScaches,andnewworktreelabels;.openidea stayscompatible. Defer incomingexception-breakpoint expansion;existingdebuggerfixesretained. Three history regressions expose attachmentAPIundo bypass;reviewedwrappersfix it. BothRustexporterstests regeneratebindings/snapshot. Fresh5897Rust/274ignored/13filtered(all11legacyplus2pendingenvfixtures),strictworkspaceClippy/format,15436frontend/11skips/types/lint/format/Knip/build/Safari,111browserand145realcandidate198clientHost(75/70)+3normalformatterpass. Initial3staleexceptionlabels corrected;2browserclosedeadlines failfirstfullrun thenpassunchangedisolated/fullrerun;noclockrelaxation orproductfixclaimed. App127/default197unchanged;source247/candidate198preservedandunbundled;onlylatest7testsretained/compilerdistremoved. NativeGUIuser-skipped;realfrontendlanguage-server/platform/performanceand2syntheticenvworktreecasesremainunverified. All69statusesretained."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -1313,7 +1317,8 @@
         "Package244: local signed arm64 App0.1.126 bundles exact196 effective cast declaration owners plus source243/upstreamc209. Fresh15161frontend/11skip, types/lint/format/Knip/build/Safari,24version-provenance,10packaging/pruning,3resource tests/resourceClippy and compiler-cfg witnesses pass. Embedded144client/Host (75/69;completion54) plus3formatter tests pass;8castproperty/8method targets,6accessor controls/18syntax/18realLaravel assertions and same-root195/196 upgrade pass using bundled executable. Broader13positive/7negative nav,17exact/17catalogrefs,4configuredPHP cases,121Laravel syntax/387runtime/exact3intentionaldiagnostics and23controlledbrowser cases pass. Reuse source2435747Rust/272ignored/same11exclusions/Clippy and196engine18756main/17ignored/twochildren/bothreleaseClippy; initial unchanged stop_group failure retained. Deep/strict signature/source receipts verify; only App126/latest7regression executables remain and compiler/dist output is removed. Existing traitcasts and camelCasegetter inference gaps remain. Native GUI/install/notary/OS13runtime unverified; all69statuses stay partial/deferred. MainSHA e0bff97db1cff7bddc7a6a2f3319b5ec4408a4d34128f33f1a3104da7d8c6610; engineSHA 19e71c19311f040b490c49e7f9b552ecf00c96e98a91a49bd787a9a8e76b4986. See docs/OPENSTORM.md and slice244 receipts.",
         "Source245: inactive signed PHPantom197 records trait cast metadata and selects effective $casts/casts() origins independently. Actual196 wire/Host RED has float instead of real Laravel bool;197 actual144client/Host (75/69;completion54) and3formatter tests pass, requiring all8cast property hover types across both query orders/dirty targets/restart/discard. Direct197 protocol8property/8method/16hover responses correct. Six resolved own/inherited/nested/selected/empty method variants and12realLaravel assertions pass. Fresh engine18757/17ignored/twochildren/bothreleaseClippy, Rust5747/272ignored/same11exclusions/Clippy,15161frontend/11skip/types/lint/format/Knip/build/Safari and23browser cases pass. Initial unresolved-name unit failures and corrected formatting receipt retained; actualHost/wire are productionRED proof. SignedSHA 83ba9e9f945ec0113b8bd42964193068b0e1460ded529a4bb16b273fd8351821; source f619d3804e01. App126/default196 unchanged;candidate not bundled. Own compiler/dist removed/latest7testexecutables. Native GUI skipped;camelCasegetter and wider dynamic/alias matrices remain open;69statuses67partial/2debuggerdeferred. See docs/OPENSTORM.md and slice245 receipts.",
         "Package246: signed local arm64 App0.1.127 promotes exact197/source245 trait cast inference. Fresh15161frontend/11skip,types/lint/format/Knip/build/Safari,24version-provenance,10packaging/pruning,3resource tests/strictresourceClippy and actualcompiler normal-cfg witnesses pass. Embedded144client/Host (75/69;completion54) plus3formatter tests pass;8property/8method targets/all16hovers,unsavedbool/int/bool freshness,same-project196float/197bool/reopen197bool,6accessor controls/18syntax/18runtime pass. Broad13positive/7negative navigation,17exact/17catalog-origin refs,4configuredPHP,121Laravel syntax/387runtime/exact3intentionaldiagnostics and23browser cases pass. Reuse exact24518757engine/17ignored/twochildren/bothreleaseClippy and5747Rust/272ignored/same11exclusions/Clippy. Resource compiler output removed before native build; native compiler/dist and priorApp126 removed after acceptance. OnlyApp127/latest7regression executables remain; provenance/licenses/stashes retained. Deep/strict ad-hoc signature verifies. Native GUI/install/notary/OS13runtime skipped/unverified;camelCasegetter/widerdynamic/alias/model/service gates remain open;69statuses67partial/2debuggerdeferred. MainSHA ac43823cee06e828fe4c96a609f8421c8130e11de7b80e41e7e19c92e9b4db6c;engineSHA 83ba9e9f945ec0113b8bd42964193068b0e1460ded529a4bb16b273fd8351821. See docs/OPENSTORM.md and slice246 receipts.",
-        "Source247: inactive signed PHPantom198 fixes accessor alias types/completions and metadata-selected getter definitions. Canonical/camel and declared flat/uppercase spellings follow legacy-before-modern getter precedence;setter-only casts and public real PHP members remain correct. Actual197 protocol has2/15correcttype-completion and12/15definitions;198 has15/15both. Fifteen valid models pass45syntax/30realLaravel assertions. Actual197HostRED becomes198GREEN acrossbothqueryorders/dirtyUnicodepositions/getterstring-int-string/restart/discard/calleranddiskpreservation/ordinarymethodint. Same-root197/198/reopen198changesbool/string/string andmodern/legacygetteroriginwithunchangedsource;unsavedint/stringpass. Fresh18759engine/17ignored/twochildren/bothClippy,5747Rust/273ignored/same11/Clippy,145actualclientHost(75/70;completion55)+3formatter,15161frontend/11skip/types/lint/format/Knip/build/Safari and23browserpass. SignedSHA ad5c5611532d07f9e20e2bd7e55db65646eca0afac669117fd10e9075a70a7b5;sourcef74fc50cd391. App127/default197soleandunchanged;198unbundled. Compiler/distremoved/latest7tests;stashes/provenance/licensespreserved. NativeGUI/user-deferdebuggerexpansion remain unchanged;all69statuses67partial/2deferred. Widercallbacks/casing/visibility/dynamicmatricesremainopen. See docs/OPENSTORM.md and slice247 receipts."
+        "Source247: inactive signed PHPantom198 fixes accessor alias types/completions and metadata-selected getter definitions. Canonical/camel and declared flat/uppercase spellings follow legacy-before-modern getter precedence;setter-only casts and public real PHP members remain correct. Actual197 protocol has2/15correcttype-completion and12/15definitions;198 has15/15both. Fifteen valid models pass45syntax/30realLaravel assertions. Actual197HostRED becomes198GREEN acrossbothqueryorders/dirtyUnicodepositions/getterstring-int-string/restart/discard/calleranddiskpreservation/ordinarymethodint. Same-root197/198/reopen198changesbool/string/string andmodern/legacygetteroriginwithunchangedsource;unsavedint/stringpass. Fresh18759engine/17ignored/twochildren/bothClippy,5747Rust/273ignored/same11/Clippy,145actualclientHost(75/70;completion55)+3formatter,15161frontend/11skip/types/lint/format/Knip/build/Safari and23browserpass. SignedSHA ad5c5611532d07f9e20e2bd7e55db65646eca0afac669117fd10e9075a70a7b5;sourcef74fc50cd391. App127/default197soleandunchanged;198unbundled. Compiler/distremoved/latest7tests;stashes/provenance/licensespreserved. NativeGUI/user-deferdebuggerexpansion remain unchanged;all69statuses67partial/2deferred. Widercallbacks/casing/visibility/dynamicmatricesremainopen. See docs/OPENSTORM.md and slice247 receipts.",
+        "Upstream76d67145f source merge:45commits afterc209;Gitworkflows/npm/Biome/Stylelint/Tailwind/editorfixes/URLpins. Retain reviewedformatwitnesses/project/settings guards,sharedreviewedhistory,OpenStormidentity/separateGradle/JDTLScaches,andnewworktreelabels;.openidea stayscompatible. Defer incomingexception-breakpoint expansion;existingdebuggerfixesretained. Three history regressions expose attachmentAPIundo bypass;reviewedwrappersfix it. BothRustexporterstests regeneratebindings/snapshot. Fresh5897Rust/274ignored/13filtered(all11legacyplus2pendingenvfixtures),strictworkspaceClippy/format,15436frontend/11skips/types/lint/format/Knip/build/Safari,111browserand145realcandidate198clientHost(75/70)+3normalformatterpass. Initial3staleexceptionlabels corrected;2browserclosedeadlines failfirstfullrun thenpassunchangedisolated/fullrerun;noclockrelaxation orproductfixclaimed. App127/default197unchanged;source247/candidate198preservedandunbundled;onlylatest7testsretained/compilerdistremoved. NativeGUIuser-skipped;realfrontendlanguage-server/platform/performanceand2syntheticenvworktreecasesremainunverified. All69statusesretained."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted. Slice74 closes the reproduced immediate-navigation null in source/client checks; packaged native repetition remains pending by explicit user instruction to skip native checks for now. Source234 fixes both live-editor formatter guards with lifecycle,project/settings/indent and sync-barrier regressions. Slice235 fixes the recorded before-commit stale edit path using input-bound backend plans and shared atomic application. App122 includes234/235;native GUI verification remains user-skipped. Closed non-PHP dependency/configuration inputs beyond the PHP inventory, hashing latency and cancellation guarantees remain incomplete or unmeasured. Broader project/configuration and native cases remain open."
     },
@@ -1487,94 +1492,124 @@
         "Package244: local signed arm64 App0.1.126 bundles exact196 effective cast declaration owners plus source243/upstreamc209. Fresh15161frontend/11skip, types/lint/format/Knip/build/Safari,24version-provenance,10packaging/pruning,3resource tests/resourceClippy and compiler-cfg witnesses pass. Embedded144client/Host (75/69;completion54) plus3formatter tests pass;8castproperty/8method targets,6accessor controls/18syntax/18realLaravel assertions and same-root195/196 upgrade pass using bundled executable. Broader13positive/7negative nav,17exact/17catalogrefs,4configuredPHP cases,121Laravel syntax/387runtime/exact3intentionaldiagnostics and23controlledbrowser cases pass. Reuse source2435747Rust/272ignored/same11exclusions/Clippy and196engine18756main/17ignored/twochildren/bothreleaseClippy; initial unchanged stop_group failure retained. Deep/strict signature/source receipts verify; only App126/latest7regression executables remain and compiler/dist output is removed. Existing traitcasts and camelCasegetter inference gaps remain. Native GUI/install/notary/OS13runtime unverified; all69statuses stay partial/deferred. MainSHA e0bff97db1cff7bddc7a6a2f3319b5ec4408a4d34128f33f1a3104da7d8c6610; engineSHA 19e71c19311f040b490c49e7f9b552ecf00c96e98a91a49bd787a9a8e76b4986. See docs/OPENSTORM.md and slice244 receipts.",
         "Source245: inactive signed PHPantom197 records trait cast metadata and selects effective $casts/casts() origins independently. Actual196 wire/Host RED has float instead of real Laravel bool;197 actual144client/Host (75/69;completion54) and3formatter tests pass, requiring all8cast property hover types across both query orders/dirty targets/restart/discard. Direct197 protocol8property/8method/16hover responses correct. Six resolved own/inherited/nested/selected/empty method variants and12realLaravel assertions pass. Fresh engine18757/17ignored/twochildren/bothreleaseClippy, Rust5747/272ignored/same11exclusions/Clippy,15161frontend/11skip/types/lint/format/Knip/build/Safari and23browser cases pass. Initial unresolved-name unit failures and corrected formatting receipt retained; actualHost/wire are productionRED proof. SignedSHA 83ba9e9f945ec0113b8bd42964193068b0e1460ded529a4bb16b273fd8351821; source f619d3804e01. App126/default196 unchanged;candidate not bundled. Own compiler/dist removed/latest7testexecutables. Native GUI skipped;camelCasegetter and wider dynamic/alias matrices remain open;69statuses67partial/2debuggerdeferred. See docs/OPENSTORM.md and slice245 receipts.",
         "Package246: signed local arm64 App0.1.127 promotes exact197/source245 trait cast inference. Fresh15161frontend/11skip,types/lint/format/Knip/build/Safari,24version-provenance,10packaging/pruning,3resource tests/strictresourceClippy and actualcompiler normal-cfg witnesses pass. Embedded144client/Host (75/69;completion54) plus3formatter tests pass;8property/8method targets/all16hovers,unsavedbool/int/bool freshness,same-project196float/197bool/reopen197bool,6accessor controls/18syntax/18runtime pass. Broad13positive/7negative navigation,17exact/17catalog-origin refs,4configuredPHP,121Laravel syntax/387runtime/exact3intentionaldiagnostics and23browser cases pass. Reuse exact24518757engine/17ignored/twochildren/bothreleaseClippy and5747Rust/272ignored/same11exclusions/Clippy. Resource compiler output removed before native build; native compiler/dist and priorApp126 removed after acceptance. OnlyApp127/latest7regression executables remain; provenance/licenses/stashes retained. Deep/strict ad-hoc signature verifies. Native GUI/install/notary/OS13runtime skipped/unverified;camelCasegetter/widerdynamic/alias/model/service gates remain open;69statuses67partial/2debuggerdeferred. MainSHA ac43823cee06e828fe4c96a609f8421c8130e11de7b80e41e7e19c92e9b4db6c;engineSHA 83ba9e9f945ec0113b8bd42964193068b0e1460ded529a4bb16b273fd8351821. See docs/OPENSTORM.md and slice246 receipts.",
-        "Source247: inactive signed PHPantom198 fixes accessor alias types/completions and metadata-selected getter definitions. Canonical/camel and declared flat/uppercase spellings follow legacy-before-modern getter precedence;setter-only casts and public real PHP members remain correct. Actual197 protocol has2/15correcttype-completion and12/15definitions;198 has15/15both. Fifteen valid models pass45syntax/30realLaravel assertions. Actual197HostRED becomes198GREEN acrossbothqueryorders/dirtyUnicodepositions/getterstring-int-string/restart/discard/calleranddiskpreservation/ordinarymethodint. Same-root197/198/reopen198changesbool/string/string andmodern/legacygetteroriginwithunchangedsource;unsavedint/stringpass. Fresh18759engine/17ignored/twochildren/bothClippy,5747Rust/273ignored/same11/Clippy,145actualclientHost(75/70;completion55)+3formatter,15161frontend/11skip/types/lint/format/Knip/build/Safari and23browserpass. SignedSHA ad5c5611532d07f9e20e2bd7e55db65646eca0afac669117fd10e9075a70a7b5;sourcef74fc50cd391. App127/default197soleandunchanged;198unbundled. Compiler/distremoved/latest7tests;stashes/provenance/licensespreserved. NativeGUI/user-deferdebuggerexpansion remain unchanged;all69statuses67partial/2deferred. Widercallbacks/casing/visibility/dynamicmatricesremainopen. See docs/OPENSTORM.md and slice247 receipts."
+        "Source247: inactive signed PHPantom198 fixes accessor alias types/completions and metadata-selected getter definitions. Canonical/camel and declared flat/uppercase spellings follow legacy-before-modern getter precedence;setter-only casts and public real PHP members remain correct. Actual197 protocol has2/15correcttype-completion and12/15definitions;198 has15/15both. Fifteen valid models pass45syntax/30realLaravel assertions. Actual197HostRED becomes198GREEN acrossbothqueryorders/dirtyUnicodepositions/getterstring-int-string/restart/discard/calleranddiskpreservation/ordinarymethodint. Same-root197/198/reopen198changesbool/string/string andmodern/legacygetteroriginwithunchangedsource;unsavedint/stringpass. Fresh18759engine/17ignored/twochildren/bothClippy,5747Rust/273ignored/same11/Clippy,145actualclientHost(75/70;completion55)+3formatter,15161frontend/11skip/types/lint/format/Knip/build/Safari and23browserpass. SignedSHA ad5c5611532d07f9e20e2bd7e55db65646eca0afac669117fd10e9075a70a7b5;sourcef74fc50cd391. App127/default197soleandunchanged;198unbundled. Compiler/distremoved/latest7tests;stashes/provenance/licensespreserved. NativeGUI/user-deferdebuggerexpansion remain unchanged;all69statuses67partial/2deferred. Widercallbacks/casing/visibility/dynamicmatricesremainopen. See docs/OPENSTORM.md and slice247 receipts.",
+        "Upstream76d67145f source merge:45commits afterc209;Gitworkflows/npm/Biome/Stylelint/Tailwind/editorfixes/URLpins. Retain reviewedformatwitnesses/project/settings guards,sharedreviewedhistory,OpenStormidentity/separateGradle/JDTLScaches,andnewworktreelabels;.openidea stayscompatible. Defer incomingexception-breakpoint expansion;existingdebuggerfixesretained. Three history regressions expose attachmentAPIundo bypass;reviewedwrappersfix it. BothRustexporterstests regeneratebindings/snapshot. Fresh5897Rust/274ignored/13filtered(all11legacyplus2pendingenvfixtures),strictworkspaceClippy/format,15436frontend/11skips/types/lint/format/Knip/build/Safari,111browserand145realcandidate198clientHost(75/70)+3normalformatterpass. Initial3staleexceptionlabels corrected;2browserclosedeadlines failfirstfullrun thenpassunchangedisolated/fullrerun;noclockrelaxation orproductfixclaimed. App127/default197unchanged;source247/candidate198preservedandunbundled;onlylatest7testsretained/compilerdistremoved. NativeGUIuser-skipped;realfrontendlanguage-server/platform/performanceand2syntheticenvworktreecasesremainunverified. All69statusesretained."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     }
   ],
   "source_sha256": "1099a56789f19e555b26336df06f3aa756b52ec9e3f08d17a09ab10195c133fa",
   "upstream_sync": {
-    "commit": "c209e189e082fe4b59e00ee9d7b13a19d0ae6458",
-    "merge_parent": "c0623e605d2ea47d862ae12fd8495e8d0e73ce88",
-    "merge_base": "f473cd9927f7d19c7d9c1ee7b139eae27fffc9fe",
-    "commits_since_base": 11,
+    "commit": "76d67145f54c9921db7583ab590f09b28c6e501c",
+    "merge_parent": "46f21ec1666b6474beb0adb4da3dd1c89e88365c",
+    "merge_base": "c209e189e082fe4b59e00ee9d7b13a19d0ae6458",
+    "commits_since_base": 45,
     "source_version": "0.1.50",
-    "openstorm_version": "0.1.125",
-    "state": "merged,pushed and included in localApp127;native GUI skipped",
-    "native_acceptance": "User-skipped; inherited features remain partially accepted",
+    "openstorm_version": "0.1.127",
+    "state": "merged and automated source acceptance verified;commit/push identity in delivery receipt;App127 predates this merge",
+    "native_acceptance": "User-skipped;all69 statuses retained",
     "validation": {
-      "rust_passed": 5747,
-      "rust_ignored": 270,
+      "rust_passed": 5897,
+      "rust_ignored": 274,
+      "filtered": 13,
       "existing_exclusions": 11,
-      "frontend_passed": 15161,
+      "pending_environment_fixture_tests": [
+        "new_worktree_copies_requested_local_configuration",
+        "setup_runs_after_copy_in_the_new_worktree"
+      ],
+      "frontend_passed": 15436,
       "frontend_skipped": 11,
       "actual_phpantom_client": 75,
-      "actual_phpantom_host": 67,
-      "controlled_browser": 70
+      "actual_phpantom_host": 70,
+      "candidate_engine": "198 inactive and unbundled",
+      "default_engine": 197,
+      "controlled_browser": 111
     },
     "retained_app": "/Users/longdo/Code/openidea/artifacts/batches/0.1.127/OpenStorm.app",
-    "evidence": "artifacts/checks/upstream-c209e189e/{gates,after-gates,evaluation,retention,delivery}.json;docs/OPENSTORM.md",
+    "evidence": "artifacts/checks/upstream-76d67145f/{rust-gates,frontend,after-rust,evaluation,retention,delivery}.json;docs/OPENSTORM.md",
     "previous_record": {
-      "commit": "f473cd9927f7d19c7d9c1ee7b139eae27fffc9fe",
-      "merge_commit": "55c4459c0520c4cf7f71a5871f227782d8ba83df",
-      "merge_base": "5baaf5b7de399e9a90a1143298651fa1b3aab714",
-      "commits_since_base": 292,
+      "commit": "c209e189e082fe4b59e00ee9d7b13a19d0ae6458",
+      "merge_parent": "c0623e605d2ea47d862ae12fd8495e8d0e73ce88",
+      "merge_base": "f473cd9927f7d19c7d9c1ee7b139eae27fffc9fe",
+      "commits_since_base": 11,
       "source_version": "0.1.50",
-      "openstorm_version": "0.1.124",
-      "state": "merged,pushed and verified;packaged locally inApp125;nativeGUI skipped",
-      "native_acceptance": "User-skipped;inherited features do not become newly accepted areas",
+      "openstorm_version": "0.1.125",
+      "state": "merged,pushed and included in localApp127;native GUI skipped",
+      "native_acceptance": "User-skipped; inherited features remain partially accepted",
       "validation": {
-        "rust_passed": 5738,
-        "rust_ignored": 268,
+        "rust_passed": 5747,
+        "rust_ignored": 270,
         "existing_exclusions": 11,
-        "frontend_passed": 15131,
+        "frontend_passed": 15161,
         "frontend_skipped": 11,
         "actual_phpantom_client": 75,
-        "actual_phpantom_host": 66,
-        "controlled_browser": 69
+        "actual_phpantom_host": 67,
+        "controlled_browser": 70
       },
-      "retained_app": "/Users/longdo/Code/openidea/artifacts/batches/0.1.125/OpenStorm.app",
-      "evidence": "artifacts/checks/upstream-20261122/delivery.json;docs/OPENSTORM.md",
+      "retained_app": "/Users/longdo/Code/openidea/artifacts/batches/0.1.127/OpenStorm.app",
+      "evidence": "artifacts/checks/upstream-c209e189e/{gates,after-gates,evaluation,retention,delivery}.json;docs/OPENSTORM.md",
       "previous_record": {
-        "commit": "a46f187428ff7dea57990403d4146000cef1d0fa",
-        "merge_base": "041e72106bde0124c6447e515b9bfd798bdd79ca",
-        "commits_since_base": 1643,
-        "source_version": "0.1.44",
-        "openstorm_version": "0.1.88",
-        "state": "merged and verified locally; branch history and remote ref record commit/push",
-        "native_acceptance": "Explicitly user-skipped; inherited upstream features are not newly accepted OpenStorm areas",
-        "evidence": "docs/OPENSTORM.md: upstream merge 2026-11-14",
+        "commit": "f473cd9927f7d19c7d9c1ee7b139eae27fffc9fe",
+        "merge_commit": "55c4459c0520c4cf7f71a5871f227782d8ba83df",
+        "merge_base": "5baaf5b7de399e9a90a1143298651fa1b3aab714",
+        "commits_since_base": 292,
+        "source_version": "0.1.50",
+        "openstorm_version": "0.1.124",
+        "state": "merged,pushed and verified;packaged locally inApp125;nativeGUI skipped",
+        "native_acceptance": "User-skipped;inherited features do not become newly accepted areas",
         "validation": {
-          "rust_passed": 4710,
-          "rust_ignored": 164,
-          "frontend_passed": 11883,
-          "frontend_skipped": 6,
-          "phpantom_host_passed": 9,
-          "phpantom_client_passed": 41,
-          "native": "user-skipped"
+          "rust_passed": 5738,
+          "rust_ignored": 268,
+          "existing_exclusions": 11,
+          "frontend_passed": 15131,
+          "frontend_skipped": 11,
+          "actual_phpantom_client": 75,
+          "actual_phpantom_host": 66,
+          "controlled_browser": 69
         },
-        "local_delivery": {
-          "bundle": "artifacts/batches/0.1.88/OpenStorm.app",
-          "profile": "development",
-          "architecture": "arm64",
-          "signature": "ad-hoc; strict/deep verified",
-          "executable_sha256": "2c3844de9063fa74b6256e7a108414f58a34accf5195e1434b9de5ba6b923efb",
-          "latest_only": true,
-          "compiler_cache": "owned artifacts/build cleaned; 23710 files/26.3GiB",
-          "installed": false,
-          "notarized": false
-        }
+        "retained_app": "/Users/longdo/Code/openidea/artifacts/batches/0.1.125/OpenStorm.app",
+        "evidence": "artifacts/checks/upstream-20261122/delivery.json;docs/OPENSTORM.md",
+        "previous_record": {
+          "commit": "a46f187428ff7dea57990403d4146000cef1d0fa",
+          "merge_base": "041e72106bde0124c6447e515b9bfd798bdd79ca",
+          "commits_since_base": 1643,
+          "source_version": "0.1.44",
+          "openstorm_version": "0.1.88",
+          "state": "merged and verified locally; branch history and remote ref record commit/push",
+          "native_acceptance": "Explicitly user-skipped; inherited upstream features are not newly accepted OpenStorm areas",
+          "evidence": "docs/OPENSTORM.md: upstream merge 2026-11-14",
+          "validation": {
+            "rust_passed": 4710,
+            "rust_ignored": 164,
+            "frontend_passed": 11883,
+            "frontend_skipped": 6,
+            "phpantom_host_passed": 9,
+            "phpantom_client_passed": 41,
+            "native": "user-skipped"
+          },
+          "local_delivery": {
+            "bundle": "artifacts/batches/0.1.88/OpenStorm.app",
+            "profile": "development",
+            "architecture": "arm64",
+            "signature": "ad-hoc; strict/deep verified",
+            "executable_sha256": "2c3844de9063fa74b6256e7a108414f58a34accf5195e1434b9de5ba6b923efb",
+            "latest_only": true,
+            "compiler_cache": "owned artifacts/build cleaned; 23710 files/26.3GiB",
+            "installed": false,
+            "notarized": false
+          }
+        },
+        "source_merge_packaged": true,
+        "packaged_in": "0.1.125",
+        "package_slice": 242
       },
       "source_merge_packaged": true,
-      "packaged_in": "0.1.125",
-      "package_slice": 242
-    },
-    "source_merge_packaged": true,
-    "packaged_in": "0.1.127",
-    "unverified": "Native GUI, real SSH build/deployment, real-service skill installation and Mocha/node process smoke; no newly accepted feature areas",
-    "package_slice": 246,
-    "first_packaged_in": "0.1.126",
-    "first_package_slice": 244
+      "packaged_in": "0.1.127",
+      "unverified": "Native GUI, real SSH build/deployment, real-service skill installation and Mocha/node process smoke; no newly accepted feature areas",
+      "package_slice": 246,
+      "first_packaged_in": "0.1.126",
+      "first_package_slice": 244
+    }
   },
   "laravel_navigation_batch": {
     "version": "0.1.25",
@@ -2355,6 +2390,12 @@
         "status": "Cast declaration owner fix243 packaged in local App126; native GUI skipped",
         "evidence": "artifacts/checks/slice244/post-package.json"
       }
+    },
+    "unpackaged_upstream": {
+      "commit": "76d67145f54c9921db7583ab590f09b28c6e501c",
+      "packaged": false,
+      "packaging_required": true,
+      "evidence": "artifacts/checks/upstream-76d67145f/delivery.json"
     }
   },
   "invokable_handler_navigation_candidate": {

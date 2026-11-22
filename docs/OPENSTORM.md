@@ -15,6 +15,51 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Before-commit formatting slice 235 (source accepted; not packaged):
+FEAT-001/018/066/069: the old headless formatter accepted edits from an older
+buffer. A held real LSP reply inserted spaces into a newly typed PHP string
+literal; actual Host apply/save persisted that corrupted literal. The unchanged
+control passed. Both failing logs and a reproducible source witness are retained.
+The new trusted lsp_format_edit command binds expected document version/path,
+project/settings/open-buffer revisions, target disk bytes and engine generations
+before requesting formatting. The returned plan retains input versions and
+preconditions through formatter-marker filtering and uses the existing atomic
+guarded workspace-edit transaction, recovery and grouped undo. Generic targets
+receive a raw disk witness even outside the PHP source inventory. Project and
+settings changes retire subsequent before-commit apply/save/close/saveAll calls.
+Existing external save-conflict protection remains authoritative at application.
+
+Three real Host regressions pass 84 primary PHP/plaintext scenario combinations:
+unchanged and edited controls; changes during requests or before application to
+buffers, external disk, Composer config, settings, newly opened dirty dependencies, read-only
+state, closure, paths, server generations and project ownership; dirty-input
+formatting, grouped undo/redo and external-conflict refusals. Additional assertions
+cover stale caller versions/paths, overlapping/duplicate targets and preservation
+of buffer/disk bytes. Eleven frontend regressions check the actual before-commit
+consumer's command contract, guard preservation, marker filtering, refusals and
+project/settings retirement. Initial test scaffolding used the wrong unit IPC
+reply and Save As for an existing file; both were corrected to the real contracts,
+with the initial failures retained. No .env fixtures are introduced by this slice.
+
+Fresh checks: generated bindings/command snapshot; workspace all-target Clippy;
+5,635 Rust passes, 265 ignored and the same 11 explicit HTTP/direnv
+exclusions; 14,680 frontend passes/eight existing skips; types, lint,
+formatting, Knip, production build/Safari compatibility; 23 controlled browser
+flows; and all 139 actual PHPantom 191 client/Host cases. The compiler retains its
+inherited nonfatal Darwin unwind-table warning. Only the latest seven regression
+executables remain after verification; the old test set and compiler output
+(Removed 21596 files, 33.2GiB total) and 73,749,818 frontend
+bytes were removed. All seven executables still list their tests after cleanup.
+
+App 0.1.121 and its signed engine remain unchanged; it does not contain source
+234/235. Cohesive packaging and native UI checks remain open; GUI checks are
+user-skipped. The PHP-centric project inventory is reused: closed non-PHP
+dependency/configuration graph freshness, large-project hashing latency and
+cancellation guarantees remain incomplete or unmeasured. No whole-area acceptance
+is promoted: all 69 areas remain 67 partial/two debugger user-deferred. Evidence:
+artifacts/checks/slice235/{baseline,review,gates,evaluation,frozen-runtimes,
+retention,retained-runtime-lists,acceptance}.json and the retained failure logs.
+
 Formatter freshness slice 234 (frontend source accepted; not packaged):
 FEAT-018/066: a delayed formatter response applied edits after the editor's path,
 document identity or read-only metadata changed while its Text object stayed the

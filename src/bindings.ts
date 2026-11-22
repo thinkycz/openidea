@@ -812,6 +812,7 @@ export const commands = {
 	start: Pos,
 	end: Pos,
 } | null, options: FormatOptions) => typedError<TextEdit[], IdeError>(__TAURI_INVOKE("lsp_format", { doc, range, options })),
+	lspFormatEdit: (doc: DocId, expectedVersion: number, expectedPath: string, options: FormatOptions) => typedError<WorkspaceEdit_Serialize, IdeError>(__TAURI_INVOKE("lsp_format_edit", { doc, expectedVersion, expectedPath, options })),
 	lspGoto: (doc: DocId, pos: Pos, kind: GotoKind) => typedError<Location[], IdeError>(__TAURI_INVOKE("lsp_goto", { doc, pos, kind })),
 	/**
 	 *  Go to Implementation of the symbol at `pos`. Implementations found before a

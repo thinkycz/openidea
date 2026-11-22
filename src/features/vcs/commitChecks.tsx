@@ -105,12 +105,13 @@ function wholeRange(text: string) {
   return { start: { line: 0, col: 0 }, end: { line: lines.length - 1, col: lines[lines.length - 1]!.length } };
 }
 
-async function applyKind(doc: number, text: string, kind: string): Promise<boolean> {
+async function applyKind(doc: number, text: string, kind: string, current: () => boolean): Promise<boolean> {
+  if (!current()) return false;
   const actions = (await call(commands.lspCodeActions(doc, wholeRange(text), [kind]))).filter(
     (a) => a.kind?.startsWith(kind) && !a.disabledReason,
   );
   const action = actions.find((a) => a.isPreferred) ?? actions[0];
-  if (!action) return false;
+  if (!action || !current()) return false;
   await call(commands.lspApplyCodeAction(doc, action));
   return true;
 }
@@ -122,7 +123,8 @@ export interface Modifications {
 }
 
 /** Applies the enabled modifications to one file and saves it. Errors are logged, not thrown. */
-async function modifyFile(path: string, mods: Modifications) {
+async function modifyFile(path: string, mods: Modifications, current: () => boolean) {
+  if (!current()) return;
   let info;
   try {
     info = await call(commands.docOpen(path));
@@ -130,42 +132,50 @@ async function modifyFile(path: string, mods: Modifications) {
     return;
   }
   try {
+    if (!current()) return;
     const step = async (label: string, run: () => Promise<unknown>) => {
       try {
+        if (!current()) return false;
         await run();
+        return current();
       } catch (e) {
         logConsole("info", `${label} skipped for ${baseName(path)}: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
       }
     };
     if (mods.optimizeImports)
       await step("Optimize imports", async () =>
-        applyKind(info.id, (await call(commands.docSnapshot(info.id))).text, "source.organizeImports"),
+        applyKind(info.id, (await call(commands.docSnapshot(info.id))).text, "source.organizeImports", current),
       );
     if (mods.cleanup)
       await step("Cleanup", async () =>
-        applyKind(info.id, (await call(commands.docSnapshot(info.id))).text, "source.fixAll"),
+        applyKind(info.id, (await call(commands.docSnapshot(info.id))).text, "source.fixAll", current),
       );
     const { project, settings } = useProject.getState();
     const guard = formatGuardOptions(settings);
-    if (mods.reformat && !formatExcluded(path, project?.root ?? null, guard.doNotFormat))
-      await step("Reformat code", async () => {
+    if (mods.reformat && !formatExcluded(path, project?.root ?? null, guard.doNotFormat)) {
+      const formatted = await step("Reformat code", async () => {
         const editor = settings?.editor as { tabSize?: number; insertSpaces?: boolean } | undefined;
-        const text = (await call(commands.docSnapshot(info.id))).text;
-        const edits = guardTextEdits(
-          text,
-          await call(
-            commands.lspFormat(info.id, null, {
-              tabSize: editor?.tabSize ?? 4,
-              insertSpaces: editor?.insertSpaces ?? true,
-            }),
-          ),
-          guard,
+        const input = await call(commands.docSnapshot(info.id));
+        if (!current()) return;
+        const edit = await call(
+          commands.lspFormatEdit(info.id, input.version, input.path, {
+            tabSize: editor?.tabSize ?? 4,
+            insertSpaces: editor?.insertSpaces ?? true,
+          }),
         );
-        if (edits.length) await call(commands.applyWorkspaceEdit({ files: [{ kind: "edit", path, edits }] }));
+        if (!current()) return;
+        for (const file of edit.files) {
+          if (file.kind === "edit") file.edits = guardTextEdits(input.text, file.edits, guard);
+        }
+        if (edit.files.some((file) => file.kind === "edit" && file.edits.length))
+          await call(commands.applyWorkspaceEdit(edit));
       });
-    await call(commands.docSave(info.id));
+      if (!formatted) return;
+    }
+    if (current()) await call(commands.docSave(info.id));
   } finally {
-    void commands.docClose(info.id);
+    if (current()) void commands.docClose(info.id);
   }
 }
 
@@ -187,7 +197,19 @@ async function modifyFiles(ctx: CommitCheckContext) {
     "info",
     `Before commit: ${[mods.optimizeImports && "optimize imports", mods.cleanup && "cleanup", mods.reformat && "reformat code"].filter(Boolean).join(", ")}`,
   );
-  for (const p of ctx.existing) await modifyFile(p, mods);
+  const scope = useProject.getState();
+  const current = () => {
+    const now = useProject.getState();
+    return (
+      now.project === scope.project &&
+      now.settings === scope.settings &&
+      !now.opening &&
+      now.openingPath === scope.openingPath &&
+      now.lightEdit === scope.lightEdit
+    );
+  };
+  for (const p of ctx.existing) await modifyFile(p, mods, current);
+  if (!current()) return;
   try {
     await maybeEditorService()?.saveAll();
   } catch {

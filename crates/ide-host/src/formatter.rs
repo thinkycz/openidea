@@ -142,6 +142,82 @@ fn minimal_edits(text: &str, edits: Vec<TextEdit>) -> Vec<TextEdit> {
         .collect()
 }
 
+/// Bind headless formatting to the input that the caller used for filtering edits.
+/// Application still goes through the shared guarded workspace-edit transaction.
+pub async fn format_edit(
+    host: &Host,
+    window: &str,
+    doc: DocId,
+    expected_version: u32,
+    expected_path: std::path::PathBuf,
+    options: FormatOptions,
+) -> IdeResult<ide_core::WorkspaceEdit> {
+    let project = host.project(window)?;
+    let captured = project.clone();
+    let (before, mut edit) = host
+        .blocking(move || {
+            let mut before = captured.edit_guard()?;
+            let snap = captured.documents.snapshot(doc)?;
+            if snap.version != expected_version || *snap.path != expected_path {
+                return Err(IdeError::cancelled());
+            }
+            if snap.read_only || !snap.path.is_file() || std::fs::metadata(&snap.path)?.permissions().readonly() {
+                return Err(IdeError::invalid("The file is read-only"));
+            }
+            let target = dunce::canonicalize(&snap.path)?;
+            if !before.disk_revisions.iter().any(|(path, _)| **path == target) {
+                let mut hash = blake3::Hasher::new();
+                hash.update_reader(std::fs::File::open(&target)?)?;
+                before.disk_revisions.push((target.into(), hash.finalize().to_hex().to_string()));
+            }
+            let mut edit = ide_core::WorkspaceEdit {
+                files: vec![ide_core::FileEdit::Edit {
+                    path: snap.path,
+                    edits: vec![],
+                    version: Some(i32::try_from(snap.version).map_err(|_| IdeError::cancelled())?),
+                }],
+                ..Default::default()
+            };
+            captured.documents.prepare_workspace_edit(&mut edit)?;
+            captured.validate_edit_guard(&before)?;
+            Ok((before, edit))
+        })
+        .await?;
+    let current = || host.project(window).is_ok_and(|now| std::sync::Arc::ptr_eq(&now, &project));
+    if !current() {
+        return Err(IdeError::cancelled());
+    }
+    let edits = format(host, window, doc, None, options).await?;
+    if !current() {
+        return Err(IdeError::cancelled());
+    }
+    host.blocking(move || {
+        project.validate_edit_guard(&before)?;
+        let generations = project.lsp.edit_generations();
+        if before
+            .engine_generations
+            .iter()
+            .any(|(id, generation)| generation.is_some() && !generations.contains(&(*id, *generation)))
+        {
+            return Err(IdeError::cancelled());
+        }
+        let ide_core::FileEdit::Edit { path, edits: target, .. } = &mut edit.files[0] else { unreachable!() };
+        let path = dunce::canonicalize(path)?;
+        // Generic formatter targets may be outside the PHP source inventory.
+        let expected =
+            before.disk_revisions.iter().find(|(target, _)| **target == path).ok_or_else(IdeError::cancelled)?;
+        let mut hash = blake3::Hasher::new();
+        hash.update_reader(std::fs::File::open(&path)?)?;
+        if hash.finalize().to_hex().as_str() != expected.1 {
+            return Err(IdeError::cancelled());
+        }
+        *target = edits;
+        edit.guard = Some(project.seal_edit_guard(before, &edit)?);
+        Ok(edit)
+    })
+    .await
+}
+
 pub async fn format(
     host: &Host,
     window: &str,

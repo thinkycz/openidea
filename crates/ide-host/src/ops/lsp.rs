@@ -1731,6 +1731,18 @@ pub async fn lsp_format(
 }
 
 #[command(trust = trusted)]
+pub async fn lsp_format_edit(
+    host: &Host,
+    window: &str,
+    doc: DocId,
+    expected_version: u32,
+    expected_path: std::path::PathBuf,
+    options: FormatOptions,
+) -> IdeResult<WorkspaceEdit> {
+    crate::formatter::format_edit(host, window, doc, expected_version, expected_path, options).await
+}
+
+#[command(trust = trusted)]
 pub async fn lsp_inlay_hints(host: &Host, window: &str, doc: DocId, range: Range) -> IdeResult<Vec<InlayHint>> {
     let lsp = host.project(window)?.lsp.clone();
     let Some((plugins, d)) = plugin_providers(host, window, doc, ProviderKind::InlayHints) else {
@@ -2983,6 +2995,7 @@ ide_command::domain!(
     lsp_extract_interface,
     lsp_extract_interface_info,
     lsp_format,
+    lsp_format_edit,
     lsp_goto,
     lsp_goto_implementation,
     lsp_hierarchy_members,

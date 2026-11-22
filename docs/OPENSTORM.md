@@ -15,6 +15,44 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream source merge 2026-11-22 (c209e189e; accepted source-only):
+Import 11 upstream commits since f473cd992: native skill browsing/installation,
+plugin-contributed skills and metadata, Mocha/node:test trees and rerun support,
+Java rebuild cache invalidation, literal translation values, compact UI metrics,
+and an explicit remote dogfood build command. Keep OpenStorm identity, PHPantom195,
+save-conflict protection and the existing debugger. Resolve three content
+conflicts without importing deferred exception-breakpoint expansion, remove the
+merged duplicate Python Console key, and point the new helper at
+cz.thinky.openstorm application data and a separate remote scratch cache.
+Shared .openidea project/remote protocols and existing directory override
+variables remain compatible.
+
+This is source-only: App125 remains the sole packaged app. Native GUI checks are
+user-skipped, and actual SSH execution is untested; no remote build/deployment is
+run. Preserve the unfinished slice243 virtual-cast regression separately during
+merge and restore it afterward. It is not part of this upstream acceptance.
+Fresh validation passes: 15,161 frontend tests / 11 skips, types, lint,
+formatting, Knip, production build and Safari startup checks; strict all-target
+workspace Clippy and Rust formatting; 5,747 Rust tests / 270 ignored /
+the same 11 exclusions; generated bindings and bundled PHPantom provenance.
+The current client/Host passes all 142 real PHPantom195 cases (75 / 67), and
+three normal formatter Host tests pass in the workspace. All 70 selected
+controlled-browser cases pass, including skills, editor, Laravel navigation
+and formatter flows. A fresh focused remote-helper suite verifies the OpenStorm
+application data adaptation. These checks do not establish native GUI acceptance.
+Controlled-browser fallback/stub warnings and the inherited bundle-size/Darwin unwind-table warnings
+remain recorded; native impact and exception costs are unmeasured.
+
+Removed 30.8GiB of compiler output and 77,461,000 bytes of frontend dist, and
+replaced the prior seven regression binaries with the seven accepted current
+executables. App125, Workbench, fixtures, canonical engines, licenses/provenance
+and earlier evidence remain unchanged. Preserve both existing stashes and restore
+the separate unfinished slice243 work after
+committing/pushing this merge. No environment file changes, new debugger behavior,
+app packaging, installation, real remote command, profile migration, updater
+activation, or public app release is performed. All 69 areas retain their status.
+Evidence: artifacts/checks/upstream-c209e189e/.
+
 Package slice 242 (local development App 0.1.125 accepted):
 Promote exact accepted signed PHPantom195 and package source241 concrete Eloquent
 member precedence plus upstream f473cd992. Matching resources, source pin and

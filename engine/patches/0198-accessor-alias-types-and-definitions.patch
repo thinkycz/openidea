@@ -1,0 +1,306 @@
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -1311,63 +1311,7 @@
+                 continue;
+             }
+ 
+-            // ── Legacy accessors (getXAttribute) ────────────────────
+-            if is_legacy_accessor(method) {
+-                let prop_name = legacy_accessor_property_name(&method.name);
+-                let column = schema_column_source(schema_table.as_ref(), &prop_name);
+-                let source = if column.is_some() {
+-                    PropertySource::Accessor {
+-                        method: method.name.to_string(),
+-                        mutator: mutator_methods.get(&prop_name).cloned(),
+-                        column,
+-                    }
+-                } else {
+-                    PropertySource::ComputedProperty {
+-                        method: method.name.to_string(),
+-                        mutator: mutator_methods.get(&prop_name).cloned(),
+-                    }
+-                };
+-                push_or_replace_property(
+-                    &mut properties,
+-                    PropertyInfo {
+-                        deprecation_message: method.deprecation_message.clone(),
+-                        description: method.description.clone(),
+-                        source: Some(source),
+-                        ..PropertyInfo::virtual_property_typed(
+-                            &prop_name,
+-                            method.return_type.as_ref(),
+-                        )
+-                    },
+-                );
+-                continue;
+-            }
+-
+-            // ── Modern accessors (Laravel 9+ Attribute casts) ───────
+-            if is_modern_accessor(method) {
+-                let prop_name = camel_to_snake(&method.name);
+-                let accessor_type = extract_modern_accessor_type(method);
+-                let column = schema_column_source(schema_table.as_ref(), &prop_name);
+-                let source = if column.is_some() {
+-                    PropertySource::Accessor {
+-                        method: method.name.to_string(),
+-                        mutator: mutator_methods.get(&prop_name).cloned(),
+-                        column,
+-                    }
+-                } else {
+-                    PropertySource::ComputedProperty {
+-                        method: method.name.to_string(),
+-                        mutator: mutator_methods.get(&prop_name).cloned(),
+-                    }
+-                };
+-                push_or_replace_property(
+-                    &mut properties,
+-                    PropertyInfo {
+-                        deprecation_message: method.deprecation_message.clone(),
+-                        description: method.description.clone(),
+-                        source: Some(source),
+-                        ..PropertyInfo::virtual_property_typed(&prop_name, Some(&accessor_type))
+-                    },
+-                );
++            if is_legacy_accessor(method) || is_modern_accessor(method) {
+                 continue;
+             }
+ 
+@@ -1474,6 +1418,76 @@
+             });
+         }
+ 
++        // Accessors override every declared spelling of an attribute, before casts
++        // and relations. Preserve canonical completion names and their camel aliases.
++        let mut accessor_names: Vec<String> =
++            properties.iter().map(|p| p.name.to_string()).collect();
++        let mut accessor_seen: std::collections::HashSet<String> =
++            accessor_names.iter().cloned().collect();
++        for method in &class.methods {
++            if base_model_methods.contains(&ascii_lowercase_atom(&method.name)) {
++                continue;
++            }
++            let canonical = if is_legacy_accessor(method) {
++                legacy_accessor_property_name(&method.name)
++            } else if is_modern_accessor(method) && !extract_modern_accessor_type(method).is_never()
++            {
++                camel_to_snake(&method.name)
++            } else {
++                continue;
++            };
++            let camel = helpers::snake_to_camel(&canonical);
++            for name in [canonical, camel] {
++                if accessor_seen.insert(name.clone()) {
++                    accessor_names.push(name);
++                }
++            }
++        }
++        for name in accessor_names {
++            let legacy_name = helpers::legacy_accessor_method_name(&name);
++            let modern_name = helpers::snake_to_camel(&name);
++            let getter = class
++                .get_method_ci(&legacy_name)
++                .filter(|method| is_legacy_accessor(method))
++                .map(|method| (method, method.return_type.clone()))
++                .or_else(|| {
++                    let method = class
++                        .get_method_ci(&modern_name)
++                        .filter(|method| is_modern_accessor(method))?;
++                    let hint = extract_modern_accessor_type(method);
++                    (!hint.is_never()).then_some((method, Some(hint)))
++                });
++            let Some((method, hint)) = getter else {
++                continue;
++            };
++            let mutator = class
++                .get_method_ci(&helpers::legacy_mutator_method_name(&name))
++                .filter(|method| is_legacy_mutator(method))
++                .map(|method| method.name.to_string());
++            let column = schema_column_source(schema_table.as_ref(), &name);
++            let source = if column.is_some() {
++                PropertySource::Accessor {
++                    method: method.name.to_string(),
++                    mutator,
++                    column,
++                }
++            } else {
++                PropertySource::ComputedProperty {
++                    method: method.name.to_string(),
++                    mutator,
++                }
++            };
++            push_or_replace_property(
++                &mut properties,
++                PropertyInfo {
++                    deprecation_message: method.deprecation_message.clone(),
++                    description: method.description.clone(),
++                    source: Some(source),
++                    ..PropertyInfo::virtual_property_typed(&name, hint.as_ref())
++                },
++            );
++        }
++
+         // ── Builder-as-static forwarding ────────────────────────────
+         let forwarded = build_builder_forwarded_methods(class, class_loader, cache);
+         methods.extend(forwarded);
+--- a/src/virtual_members/laravel/tests.rs
++++ b/src/virtual_members/laravel/tests.rs
+@@ -2961,3 +2961,96 @@
+     .to_string();
+     assert_eq!(result, "App\\Collections\\UserCollection|null");
+ }
++
++#[test]
++fn accessor_aliases_follow_runtime_getter_precedence() {
++    for (legacy, modern, casts, expected) in [
++        (true, None, true, "string"),
++        (true, None, false, "string"),
++        (false, Some("string"), true, "string"),
++        (false, Some("string"), false, "string"),
++        (false, Some("never"), true, "bool"),
++        (true, Some("int"), true, "string"),
++    ] {
++        let mut user = make_class("App\\Models\\User");
++        user.parent_class = Some(atom(ELOQUENT_MODEL_FQN));
++        if casts {
++            user.laravel_mut().casts_definitions = vec![("qualityLabel".into(), "bool".into())];
++        }
++        if let Some(get_type) = modern {
++            user.methods.push(Arc::new(make_method(
++                "qualityLabel",
++                Some(&format!(
++                    "Illuminate\\Database\\Eloquent\\Casts\\Attribute<{get_type}, string>"
++                )),
++            )));
++        }
++        if legacy {
++            user.methods.push(Arc::new(make_method(
++                "getQualityLabelAttribute",
++                Some("string"),
++            )));
++        }
++        let model = Arc::new(make_class(ELOQUENT_MODEL_FQN));
++        let loader = |name: &str| {
++            if name == ELOQUENT_MODEL_FQN {
++                Some(Arc::clone(&model))
++            } else {
++                None
++            }
++        };
++        let resolved = crate::virtual_members::resolve_class_fully(&user, &loader);
++        let property = resolved
++            .get_property("qualityLabel")
++            .expect("runtime camelCase attribute");
++        assert_eq!(
++            property.type_hint_str().as_deref(),
++            Some(expected),
++            "legacy={legacy} modern={modern:?} casts={casts}"
++        );
++    }
++}
++
++#[test]
++fn accessor_aliases_keep_real_php_member_precedence() {
++    let mut user = make_class("App\\Models\\User");
++    user.parent_class = Some(atom(ELOQUENT_MODEL_FQN));
++    user.laravel_mut().casts_definitions = vec![("qualityLabel".into(), "bool".into())];
++    user.methods.push(Arc::new(make_method(
++        "getQualityLabelAttribute",
++        Some("string"),
++    )));
++    user.methods
++        .push(Arc::new(make_method("qualityLabel", Some("int"))));
++    let mut physical =
++        crate::types::PropertyInfo::virtual_property_typed("qualityLabel", Some(&PhpType::bool()));
++    physical.is_virtual = false;
++    user.properties.push(Arc::new(physical));
++    let model = Arc::new(make_class(ELOQUENT_MODEL_FQN));
++    let loader = |name: &str| {
++        if name == ELOQUENT_MODEL_FQN {
++            Some(Arc::clone(&model))
++        } else {
++            None
++        }
++    };
++    let resolved = crate::virtual_members::resolve_class_fully(&user, &loader);
++    assert_eq!(
++        resolved
++            .get_property("qualityLabel")
++            .unwrap()
++            .type_hint_str()
++            .as_deref(),
++        Some("bool")
++    );
++    assert_eq!(
++        resolved
++            .get_method_ci("qualityLabel")
++            .unwrap()
++            .return_type
++            .as_ref()
++            .unwrap()
++            .to_string(),
++        "int"
++    );
++}
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -379,6 +379,23 @@
+                 )
+                 && let Some(location) =
+                     self.member_position_location(&fqn, uri, content, &owner, &effective_name, kind)
++            {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
++                locations.push(location);
++                continue;
++            }
++
++            if access_hint == MemberAccessHint::PropertyAccess
++                && access_kind == AccessKind::Arrow
++                && let Some(location) = self.eloquent_accessor_declaration_location(
++                    lookup_class,
++                    uri,
++                    content,
++                    &effective_name,
++                    &class_loader,
++                )
+             {
+                 if let Some(bits) = successful.as_mut() {
+                     bits[candidate_index] = true;
+@@ -815,6 +832,36 @@
+         Some(point_location(parsed_uri, entry_position))
+     }
+ 
++    fn eloquent_accessor_declaration_location(
++        &self,
++        class: &ClassInfo,
++        uri: &str,
++        content: &str,
++        name: &str,
++        loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    ) -> Option<Location> {
++        if !extends_eloquent_model(class, loader) {
++            return None;
++        }
++        let resolved = crate::virtual_members::resolve_class_fully_cached(
++            class,
++            loader,
++            &self.resolved_class_cache,
++        );
++        let method = match resolved.get_property(name)?.source.as_ref()? {
++            PropertySource::Accessor { method, .. }
++            | PropertySource::ComputedProperty { method, .. } => method,
++            _ => return None,
++        };
++        let (owner, fqn, kind) = Self::find_physical_member_declaration(
++            class,
++            method,
++            MemberAccessHint::MethodCall,
++            loader,
++        )?;
++        self.member_position_location(&fqn, uri, content, &owner, method, kind)
++    }
++
+     fn eloquent_cast_declaration_location(
+         &self,
+         class: &ClassInfo,

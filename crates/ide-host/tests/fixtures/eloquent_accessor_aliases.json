@@ -1,0 +1,152 @@
+[
+  {
+    "name": "legacy cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "legacy no cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "modern cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): string => 'real'); } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "modern no cast",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): string => 'real'); } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "setter only",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<never, string> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::set(fn($value): string => $value); } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "bool",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "physical property",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public bool $qualityLabel = true; public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "bool",
+    "definition_name": "qualityLabel",
+    "physical": true,
+    "ordinary_method": false
+  },
+  {
+    "name": "legacy wins modern",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<int, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): int => 7); } public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "legacy wins modern reversed",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function getQualityLabelAttribute(): string { return 'real'; } /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<int, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): int => 7); } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "inherited legacy trait",
+    "model": "<?php namespace App\\Models; trait GetterValue { public function getQualityLabelAttribute(): string { return 'real'; } } class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; use GetterValue; }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "inherited modern parent",
+    "model": "<?php namespace App\\Models; class GetterBase extends \\Illuminate\\Database\\Eloquent\\Model { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): string => 'real'); } } class Bakery extends GetterBase { protected $casts = ['qualityLabel'=>'bool'];  }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "legacy qualitylabel",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualitylabel'=>'bool']; public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualitylabel;\n",
+    "property": "qualitylabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "legacy QUALITY_LABEL",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['QUALITY_LABEL'=>'bool']; public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->QUALITY_LABEL;\n",
+    "property": "QUALITY_LABEL",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "modern qualitylabel",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualitylabel'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): string => 'real'); } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualitylabel;\n",
+    "property": "qualitylabel",
+    "expected_type": "string",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "modern QUALITY_LABEL",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['QUALITY_LABEL'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ protected function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn($value): string => 'real'); } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->QUALITY_LABEL;\n",
+    "property": "QUALITY_LABEL",
+    "expected_type": "string",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "ordinary_method": false
+  },
+  {
+    "name": "legacy getter beside ordinary method",
+    "model": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; public function qualityLabel(): int { return 7; } public function getQualityLabelAttribute(): string { return 'real'; } }",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->qualityLabel;\n$b->qualityLabel();\n",
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "ordinary_method": true
+  }
+]

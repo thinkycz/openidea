@@ -5,6 +5,8 @@ use ide_host::{Host, HostConfig, Project};
 use ide_lsp::types::{CompletionItem, CompletionKind, CompletionList, GotoKind};
 use std::{io::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
+#[path = "fixtures/eloquent_accessor_aliases.rs"]
+mod eloquent_accessor_aliases;
 #[cfg(unix)]
 #[path = "fixtures/eloquent_member_precedence.rs"]
 mod eloquent_member_precedence;

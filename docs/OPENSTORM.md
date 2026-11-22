@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 247 (accepted source; accessor aliases):
+PHPantom198 synthesizes accessor properties for canonical/camel and known declared
+attribute spellings. Legacy getters win over modern Attribute getters regardless
+of declaration order; setter-only never get-types retain their casts. Public real
+PHP properties and same-named ordinary method calls preserve their own types.
+Definition lookup follows the selected accessor source before virtual-field
+fallbacks, with physical property declarations retaining priority.
+
+Actual197 protocol responses have two of 15 correct hover/completion types and
+12 of 15 correct definitions. Candidate198 passes all 15 for both, without result
+retries. The cases cover legacy/modern accessors, casts/no casts, inherited traits
+and parents, declared flat/uppercase aliases, declaration order, setter-only casts,
+real PHP properties and a same-named ordinary method. Forty-five PHP syntax
+checks and 30 real Laravel13.37 assertions validate the fixtures.
+The initial physical-property probe expected virtual hover formatting; correct it
+to the actual public bool declaration and retain the earlier report as a harness
+format issue. The confirmed production failures are getter types and origins.
+
+Actual197 Host RED becomes198 GREEN in the new 15-case regression. It checks both
+request orders, hover/completion/exact UTF-16 definitions, Unicode dirty movement,
+getter string/int/string changes, server restart, discard and unchanged caller/disk
+bytes. Same-named ordinary method calls stay int. A same-project197/198/reopen198
+probe changes bool/string/string and modern/legacy definition origins without
+source changes; unsaved getter int/string changes pass on198.
+
+Fresh engine gates pass 18,759 main tests / 17 ignored / two isolated children,
+both release Clippy modes, formatting, source fingerprint, release build and strict
+ad-hoc arm64 signing. OpenStorm gates pass 5,747 Rust tests / 273 ignored / the same
+11 exclusions, strict all-target Clippy and formatting. The one new ignored test
+requires the pinned engine and owned Laravel vendor fixture and is run explicitly.
+All 145 actual client/Host tests pass (75 / 70; completion55), plus three normal
+formatter tests. Fresh frontend gates pass 15,161 tests / 11 skips, types/lint/
+format/Knip/build/Safari checks and all 23 selected browser cases.
+
+Candidate198 stays inactive and unbundled; App127/default197 remains the sole
+accepted app. Unusual method-name casing, opaque/never getter callbacks, renamed
+trait aliases, private/protected/dynamic-expression and wider native/service
+matrices remain unverified. All 69 areas stay 67 partial / two debugger user-deferred.
+The prior source243 intermittent stop_group race remains historical and unaccepted;
+no process fix or new exclusion is claimed. Native GUI checks remain user-skipped.
+Preserve Workbench, canonical sources, licenses/provenance, earlier evidence and
+both stashes. Owned engine/root compiler and dist output are removed after
+acceptance; retain only App127 and the latest seven regression executables.
+Commit/push this source slice before separate packaging.
+Signed198 SHA256: ad5c5611532d07f9e20e2bd7e55db65646eca0afac669117fd10e9075a70a7b5.
+Source fingerprint: f74fc50cd391; patch0198/source pin198.
+Evidence: artifacts/checks/slice247/{diagnosis,probe-197,probe-198,actual197-host-red,
+engine-summary,upgrade-freshness,frontend,final-gates,evaluation,retention,delivery}.json.
+
 Package slice 246 (local development App0.1.127 accepted):
 Bundle exact signed PHPantom197 and source245. Trait-supplied literal casts now
 infer the effective method/property types and track unsaved bool/int/bool changes.

@@ -1,0 +1,240 @@
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -562,7 +562,13 @@
+                         &trait_def.attribute_lists,
+                         doc_ctx,
+                     );
++                    let casts = crate::virtual_members::laravel::extract_cast_metadata(
++                        trait_def.members.iter(),
++                        doc_ctx.map(|c| c.content).unwrap_or(""),
++                    );
++                    let laravel = (casts.declared != 0).then(|| Box::new(casts));
+                     classes.push(ClassInfo {
++                        laravel,
+                         kind: ClassLikeKind::Trait,
+                         name: trait_name,
+                         methods: methods.into_iter().map(Arc::new).collect::<Vec<_>>().into(),
+--- a/src/inheritance/mod.rs
++++ b/src/inheritance/mod.rs
+@@ -250,8 +250,8 @@
+ }
+ 
+ use crate::virtual_members::laravel::{
+-    ELOQUENT_MODEL_FQN, factory_model_type, has_inheritable_model_metadata, inherit_model_metadata,
+-    is_factory_class,
++    ELOQUENT_MODEL_FQN, extends_eloquent_model, factory_model_type, has_inheritable_model_metadata,
++    inherit_model_metadata, is_factory_class, resolve_effective_model_casts,
+ };
+ 
+ /// Resolve a class together with all inherited members from its parent
+@@ -750,6 +750,10 @@
+         }
+     }
+ 
++    if extends_eloquent_model(class, class_loader) {
++        resolve_effective_model_casts(&mut merged, class, class_loader);
++    }
++
+     merged
+ }
+ 
+--- a/src/inheritance/inheritance_tests.rs
++++ b/src/inheritance/inheritance_tests.rs
+@@ -1090,3 +1090,55 @@
+     assert!(find_declaring_ancestor(&class, &loader, &|_| false).is_none());
+     assert_eq!(loads.get(), DEPTH);
+ }
++
++#[test]
++fn trait_casts_follow_effective_method_and_property_declarations() {
++    let source = concat!(
++        "<?php\n",
++        "namespace Illuminate\\Database\\Eloquent { class Model {} }\n",
++        "namespace {\n",
++        "trait BoolCasts { protected function casts(): array { return ['quality' => 'bool']; } }\n",
++        "trait EmptyCasts { protected function casts(): array { return []; } }\n",
++        "trait NestedCasts { use BoolCasts; }\n",
++        "class OwnProperty extends \\Illuminate\\Database\\Eloquent\\Model { use BoolCasts; protected $casts = ['quality' => 'float']; }\n",
++        "class OwnMethod extends OwnProperty { protected function casts(): array { return ['quality' => 'int']; } }\n",
++        "class Inherited extends OwnProperty {}\n",
++        "class Nested extends \\Illuminate\\Database\\Eloquent\\Model { use NestedCasts; protected $casts = ['quality' => 'float']; }\n",
++        "class EmptyMethod extends OwnProperty { use EmptyCasts; }\n",
++        "class Selected extends \\Illuminate\\Database\\Eloquent\\Model { use EmptyCasts, BoolCasts { BoolCasts::casts insteadof EmptyCasts; } protected $casts = ['quality' => 'float']; }\n",
++        "}\n",
++    );
++    let (mut parsed, blocks) =
++        crate::Backend::parse_php_classes_by_block(source, None, false, false);
++    crate::Backend::resolve_parent_class_names_by_block(
++        &mut parsed,
++        &blocks,
++        &HashMap::new(),
++        &None,
++    );
++    let models: HashMap<_, _> = parsed
++        .into_iter()
++        .map(|(class, _, _)| (class.fqn().to_string(), Arc::new(class)))
++        .collect();
++    let loader = |name: &str| models.get(name).cloned();
++    assert!(extends_eloquent_model(&models["OwnProperty"], &loader));
++    assert!(
++        models["BoolCasts"].laravel().is_some(),
++        "trait casts reach metadata"
++    );
++    for (name, expected) in [
++        ("OwnProperty", "bool"),
++        ("OwnMethod", "int"),
++        ("Inherited", "bool"),
++        ("Nested", "bool"),
++        ("EmptyMethod", "float"),
++        ("Selected", "bool"),
++    ] {
++        let class = inherited_private_trait_resolved(&models, name);
++        assert_eq!(
++            class.laravel().unwrap().casts_definitions,
++            vec![("quality".into(), expected.into())],
++            "{name} selects effective casts() independently of $casts"
++        );
++    }
++}
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -182,8 +182,9 @@
+     synthesize_mixin_macros,
+ };
+ pub(crate) use model_extraction::{
+-    extract_laravel_metadata, has_inheritable_model_metadata, has_scope_attribute,
+-    inherit_model_metadata, relationship_return_type,
++    extract_cast_metadata, extract_laravel_metadata, has_inheritable_model_metadata,
++    has_scope_attribute, inherit_model_metadata, relationship_return_type,
++    resolve_effective_model_casts,
+ };
+ pub(crate) use morph_map::{LaravelMorphMapIndex, MorphMapEntry, MorphMapScan, scan_morph_map};
+ pub(crate) use patches::STORAGE_FACADE_FQN;
+--- a/src/virtual_members/laravel/model_extraction.rs
++++ b/src/virtual_members/laravel/model_extraction.rs
+@@ -1412,22 +1412,12 @@
+ 
+     let policy_class = extract_use_policy_attribute(&class.attribute_lists, content);
+ 
+-    let (property_casts, method_casts) = extract_cast_sources(class.members.iter(), content);
+-    let mut declared = 0;
+-    if property_casts.is_some() {
+-        declared |= model_declaration::CASTS_PROPERTY;
+-    }
+-    if method_casts.is_some() {
+-        declared |= model_declaration::CASTS_METHOD;
+-    }
+-    let (casts_definitions, cast_sources) = match (property_casts, method_casts) {
+-        (Some(property), Some(method)) => {
+-            let merged = overlay_casts(&property, &method);
+-            (merged, Some(Box::new(CastSources { property, method })))
+-        }
+-        (Some(only), None) | (None, Some(only)) => (only, None),
+-        (None, None) => (Vec::new(), None),
+-    };
++    let LaravelMetadata {
++        casts_definitions,
++        cast_sources,
++        mut declared,
++        ..
++    } = extract_cast_metadata(class.members.iter(), content);
+ 
+     let belongs_to_many_pivots = extract_pivot_relations(class.members.iter(), content);
+ 
+@@ -1554,6 +1544,96 @@
+         (true, false, _) => (Some(&meta.casts_definitions), None),
+         (false, true, _) => (None, Some(&meta.casts_definitions)),
+         (false, false, _) => (None, None),
++    }
++}
++
++pub(crate) fn extract_cast_metadata<'a>(
++    members: impl Iterator<Item = &'a class_like::member::ClassLikeMember<'a>>,
++    content: &str,
++) -> LaravelMetadata {
++    let (property_casts, method_casts) = extract_cast_sources(members, content);
++    let mut declared = 0;
++    if property_casts.is_some() {
++        declared |= model_declaration::CASTS_PROPERTY;
++    }
++    if method_casts.is_some() {
++        declared |= model_declaration::CASTS_METHOD;
++    }
++    let (casts_definitions, cast_sources) = match (property_casts, method_casts) {
++        (Some(property), Some(method)) => {
++            let merged = overlay_casts(&property, &method);
++            (merged, Some(Box::new(CastSources { property, method })))
++        }
++        (Some(only), None) | (None, Some(only)) => (only, None),
++        (None, None) => (Vec::new(), None),
++    };
++
++    LaravelMetadata {
++        casts_definitions,
++        cast_sources,
++        declared,
++        ..Default::default()
++    }
++}
++
++/// Select cast sources independently using the same trait precedence as members.
++pub(crate) fn resolve_effective_model_casts(
++    merged: &mut crate::types::ClassInfo,
++    class: &crate::types::ClassInfo,
++    loader: &dyn Fn(&str) -> Option<std::sync::Arc<crate::types::ClassInfo>>,
++) {
++    use crate::inheritance::ancestry::{find_declaring_ancestor, find_declaring_member_ancestor};
++    use model_declaration::{CASTS_METHOD, CASTS_PROPERTY};
++
++    let entries = |flag| {
++        let declares = |owner: &crate::types::ClassInfo| {
++            owner
++                .laravel()
++                .is_some_and(|meta| declared_flags(meta) & flag != 0)
++        };
++        let inherited;
++        let owner = if declares(class) {
++            class
++        } else {
++            inherited = if flag == CASTS_METHOD {
++                find_declaring_member_ancestor(class, Some("casts"), loader, &declares)
++            } else {
++                find_declaring_ancestor(class, loader, &declares)
++            }?;
++            &inherited.1
++        };
++        let meta = owner.laravel()?;
++        let (property, method) = cast_parts(meta, declared_flags(meta));
++        if flag == CASTS_METHOD {
++            method
++        } else {
++            property
++        }
++        .map(<[_]>::to_vec)
++    };
++    let property = entries(CASTS_PROPERTY);
++    let method = entries(CASTS_METHOD);
++    if property.is_none() && method.is_none() {
++        return;
++    }
++    let meta = merged.laravel_mut();
++    meta.declared &= !(CASTS_PROPERTY | CASTS_METHOD);
++    if property.is_some() {
++        meta.declared |= CASTS_PROPERTY;
++    }
++    if method.is_some() {
++        meta.declared |= CASTS_METHOD;
++    }
++    match (property, method) {
++        (Some(property), Some(method)) => {
++            meta.casts_definitions = overlay_casts(&property, &method);
++            meta.cast_sources = Some(Box::new(CastSources { property, method }));
++        }
++        (Some(only), None) | (None, Some(only)) => {
++            meta.casts_definitions = only;
++            meta.cast_sources = None;
++        }
++        (None, None) => unreachable!(),
+     }
+ }
+ 

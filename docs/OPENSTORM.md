@@ -15,6 +15,50 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 245 (accepted source; trait casts inference):
+PHPantom197 records literal $casts/casts() metadata on traits using the shared
+class extractor. After inheritance, select property and method origins independently
+through the existing ancestry walk, then apply Laravel's method-over-property
+overlay. Own methods, nested traits, selected methods, inherited consumers and
+empty trait methods have six resolved regression variants and 12 real Laravel13.37
+runtime assertions. Other model metadata retains its existing inheritance path.
+
+Default196 reproduces float hover where Laravel returns bool, through both actual
+wire and the stricter Host regression. Candidate197 passes all eight property and
+eight method targets and all 16 hover responses without result retries. The Host
+fixture now requires correct typing in every case, including both response orders,
+unsaved target movement and bool/int/bool cast changes, restart, discard,
+unchanged callers and unchanged disk.
+Same-project196/197/reopen197 returns float/bool/bool with unchanged source and
+only the caller opened. Six accessor controls preserve existing getter/setter
+navigation on196 and197.
+The earlier raw-unit failures used unresolved parent names and are retained as
+harness failures; they are not accepted production RED evidence. The corrected
+fixture uses normal namespace resolution and asserts Eloquent ancestry first.
+
+Fresh engine gates pass 18,757 main tests / 17 ignored / two isolated children,
+both release Clippy modes, format, pinned source acquisition, release build and
+strict arm64 ad-hoc signing. Fresh OpenStorm gates pass 5,747 Rust tests /
+272 ignored / the same 11 exclusions, strict workspace Clippy and formatting;
+144 actual client/Host cases (75 / 69, completion54) and three formatter tests;
+15,161 frontend tests / 11 skips, types/lint/format/Knip/build/Safari checks;
+23 controlled-browser cases and candidate provenance checks. Shortened test calls
+initially needed rustfmt; preserve the failed check and corrected pass. The prior
+slice243 intermittent stop_group race remains historical, with no process fix or
+new test exclusion claimed here. Native GUI checks are user-skipped.
+
+Candidate197 remains inactive and unbundled. App126/default196 is still the sole
+accepted app. CamelCase getter typing, dynamic/unpacked casts, renamed trait aliases,
+wider model/platform/service and native acceptance remain open. All 69 areas stay
+67 partial / two debugger user-deferred. Preserve Workbench, canonical source,
+licenses/provenance, earlier evidence and both stashes. Owned engine/root compiler
+and dist output are removed after acceptance; retain the latest seven regression
+executables. Commit/push this source slice before separate packaging.
+Signed197 SHA256: 83ba9e9f945ec0113b8bd42964193068b0e1460ded529a4bb16b273fd8351821.
+Source fingerprint: f619d3804e01; patch0197/source pin197.
+Evidence: artifacts/checks/slice245/{diagnosis,actual196-host-red,engine-summary,
+runtime,wire-196,wire-197,frontend,final-gates,evaluation,retention,delivery}.json.
+
 Package slice 244 (local development App0.1.126 accepted):
 Bundle exact accepted signed PHPantom196 and source243/upstreamc209. Cast
 properties now use their effective literal declaration owner while real methods

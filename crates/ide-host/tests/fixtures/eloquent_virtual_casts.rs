@@ -8,9 +8,6 @@ struct CastCase {
     base: String,
     target: String,
     value: Option<String>,
-    // Trait casts() hover inference is tracked separately from this declaration check.
-    #[serde(default)]
-    navigation_only: bool,
 }
 
 fn php(body: &str) -> String {
@@ -24,7 +21,7 @@ async fn check_cast_and_method(
     casts: &str,
     method: &str,
     definition_first: bool,
-    verify_cast_type: bool,
+    cast_type: &str,
 ) {
     for property in [true, false] {
         let offset = if property { source.find("->quality;") } else { source.find("->quality()") }.unwrap() + 2;
@@ -50,12 +47,8 @@ async fn check_cast_and_method(
                 .await
                 .unwrap()
                 .expect("cast/member hover");
-            let expected = if property { "**var** `bool`" } else { "function quality(): int" };
-            if !property || verify_cast_type {
-                assert!(hover.contents.value.contains(expected), "{}", hover.contents.value);
-            } else {
-                assert!(hover.contents.value.contains("source: cast"), "{}", hover.contents.value);
-            }
+            let expected = if property { format!("**var** `{cast_type}`") } else { "function quality(): int".into() };
+            assert!(hover.contents.value.contains(&expected), "{}", hover.contents.value);
         };
         if definition_first {
             definition.await;
@@ -108,30 +101,21 @@ async fn cast_properties_keep_effective_origins_beside_real_trait_methods() {
                     target => panic!("unexpected cast source {target}"),
                 };
                 let target = ide_host::ops::doc::doc_open(&f.host, "main", f.root.join(&case.target)).await.unwrap();
-                check_cast_and_method(
-                    &f,
-                    source,
-                    &case.target,
-                    original,
-                    &method,
-                    definition_first,
-                    !case.navigation_only,
-                )
-                .await;
+                check_cast_and_method(&f, source, &case.target, original, &method, definition_first, "bool").await;
                 let moved = original.replace("/* target */", "/* 😀 moved */ /* target */");
                 Fixture::lint(&moved);
                 f.project.documents.replace_all(target.id, &moved).unwrap();
                 let moved_method = if case.target.ends_with("Value.php") { &moved } else { &method };
-                check_cast_and_method(
-                    &f,
-                    source,
-                    &case.target,
-                    &moved,
-                    moved_method,
-                    definition_first,
-                    !case.navigation_only,
-                )
-                .await;
+                check_cast_and_method(&f, source, &case.target, &moved, moved_method, definition_first, "bool").await;
+                if case.name == "trait casts method" {
+                    let recast = moved.replace("'quality' => 'bool'", "'quality' => 'int'");
+                    assert_ne!(recast, moved);
+                    Fixture::lint(&recast);
+                    f.project.documents.replace_all(target.id, &recast).unwrap();
+                    check_cast_and_method(&f, source, &case.target, &recast, &recast, definition_first, "int").await;
+                    f.project.documents.replace_all(target.id, &moved).unwrap();
+                    check_cast_and_method(&f, source, &case.target, &moved, &moved, definition_first, "bool").await;
+                }
                 assert_eq!(
                     f.project.documents.snapshot(f.doc).unwrap().text,
                     source,
@@ -142,27 +126,9 @@ async fn cast_properties_keep_effective_origins_beside_real_trait_methods() {
                 let server = f.project.lsp.servers().into_iter().find(|s| s.name == "phpantom").unwrap().id;
                 ide_host::ops::lsp::lsp_restart(&f.host, "main", server).await.unwrap();
                 let moved_method = if case.target.ends_with("Value.php") { &moved } else { &method };
-                check_cast_and_method(
-                    &f,
-                    source,
-                    &case.target,
-                    &moved,
-                    moved_method,
-                    definition_first,
-                    !case.navigation_only,
-                )
-                .await;
+                check_cast_and_method(&f, source, &case.target, &moved, moved_method, definition_first, "bool").await;
                 ide_host::ops::doc::doc_close(&f.host, "main", target.id).await.unwrap();
-                check_cast_and_method(
-                    &f,
-                    source,
-                    &case.target,
-                    original,
-                    &method,
-                    definition_first,
-                    !case.navigation_only,
-                )
-                .await;
+                check_cast_and_method(&f, source, &case.target, original, &method, definition_first, "bool").await;
                 assert_eq!(std::fs::read_to_string(f.root.join("app/Probe.php")).unwrap(), source);
                 assert_eq!(std::fs::read_to_string(f.root.join(&case.target)).unwrap(), *original);
             })

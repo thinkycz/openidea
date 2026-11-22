@@ -1,0 +1,61 @@
+--- a/src/definition/member/shape_keys.rs
++++ b/src/definition/member/shape_keys.rs
+@@ -212,13 +212,13 @@
+                         // letter of the column name.
+                         return Some(Position {
+                             line: line_idx as u32,
+-                            character: (col + 1) as u32,
++                            character: line[..col + 1].encode_utf16().count() as u32,
+                         });
+                     }
+                     if let Some(col) = line.find(&double_pattern) {
+                         return Some(Position {
+                             line: line_idx as u32,
+-                            character: (col + 1) as u32,
++                            character: line[..col + 1].encode_utf16().count() as u32,
+                         });
+                     }
+ 
+--- a/tests/integration/definition_laravel.rs
++++ b/tests/integration/definition_laravel.rs
+@@ -4657,3 +4657,40 @@
+         ]
+     );
+ }
++
++#[tokio::test]
++async fn eloquent_array_entries_use_utf16_declaration_columns() {
++    for quote in ["'", "\""] {
++        for source in ["$casts =", "function casts(): array { return"] {
++            let php = format!(
++                "<?php\nnamespace App\\Models;\nclass User extends \\Illuminate\\Database\\Eloquent\\Model {{\n    protected {source} [/* 😀 漢 */ {quote}quality{quote} => {quote}bool{quote}];\n    }}\n"
++            );
++            let php = if source == "$casts =" {
++                php
++            } else {
++                php + "}\n"
++            };
++            let caller = "<?php\n(new \\App\\Models\\User())->quality;\n";
++            let (backend, dir) =
++                make_workspace(&[("src/Models/User.php", &php), ("src/Probe.php", caller)]);
++            let response = open_and_goto_definition(&backend, &dir, "src/Probe.php", caller, 1, 30)
++                .await
++                .expect("cast declaration");
++            let range = match response {
++                GotoDefinitionResponse::Scalar(location) => location.range,
++                GotoDefinitionResponse::Array(locations) => {
++                    assert_eq!(locations.len(), 1);
++                    locations[0].range
++                }
++                other => panic!("unexpected {other:?}"),
++            };
++            let key = format!("{quote}quality{quote}");
++            let line = php.lines().nth(3).unwrap();
++            let col = line[..line.find(&key).unwrap() + 1].encode_utf16().count() as u32;
++            assert_eq!(
++                range,
++                Range::new(Position::new(3, col), Position::new(3, col))
++            );
++        }
++    }
++}

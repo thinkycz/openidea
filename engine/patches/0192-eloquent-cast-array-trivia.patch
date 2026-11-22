@@ -1,0 +1,153 @@
+--- a/src/virtual_members/laravel/model_extraction.rs
++++ b/src/virtual_members/laravel/model_extraction.rs
+@@ -465,8 +465,8 @@
+     members: impl Iterator<Item = &'a class_like::member::ClassLikeMember<'a>>,
+     content: &str,
+ ) -> (Option<Vec<CastEntry>>, Option<Vec<CastEntry>>) {
+-    let mut property_text: Option<&str> = None;
+-    let mut method_text: Option<&str> = None;
++    let mut property_value = None;
++    let mut method_value = None;
+     let mut has_property = false;
+     let mut has_method = false;
+ 
+@@ -483,10 +483,7 @@
+                     }
+                     has_property = true;
+                     if let class_like::property::PropertyItem::Concrete(concrete) = item {
+-                        let span = concrete.value.span();
+-                        let start = span.start.offset as usize;
+-                        let end = span.end.offset as usize;
+-                        property_text = content.get(start..end);
++                        property_value = Some(concrete.value);
+                     }
+                 }
+             }
+@@ -500,16 +497,23 @@
+                         _ => None,
+                     })
+                 {
+-                    let span = value.span();
+-                    method_text = content.get(span.start.offset as usize..span.end.offset as usize);
++                    method_value = Some(value);
+                 }
+             }
+             _ => {}
+         }
+     }
+ 
+-    let property = has_property.then(|| property_text.map(parse_casts_array).unwrap_or_default());
+-    let method = has_method.then(|| method_text.map(parse_casts_array).unwrap_or_default());
++    let property = has_property.then(|| {
++        property_value
++            .map(|value| parse_casts_array(value, content))
++            .unwrap_or_default()
++    });
++    let method = has_method.then(|| {
++        method_value
++            .map(|value| parse_casts_array(value, content))
++            .unwrap_or_default()
++    });
+     (property, method)
+ }
+ 
+@@ -594,27 +598,33 @@
+     out
+ }
+ 
+-/// Parse key-value pairs from a PHP array literal text.
+-///
+-/// Accepts text starting with `[` and extracts `'key' => 'value'` pairs.
+-/// Both single-quoted and double-quoted strings are supported for keys
+-/// and values.  Handles multi-line arrays and trailing commas.
+-///
+-/// Returns a list of `(key, value)` string pairs.
+-fn parse_casts_array(text: &str) -> Vec<(String, String)> {
++/// Read cast entries from the parsed array, so comments and punctuation
++/// inside keys cannot be mistaken for separators. Unknown keys stay unknown.
++fn parse_casts_array(expr: &Expression<'_>, content: &str) -> Vec<(String, String)> {
++    let Some(elements) = crate::parser::array_literal_elements(crate::parser::unwrap_parens(expr))
++    else {
++        return Vec::new();
++    };
+     let mut results = Vec::new();
+-    for segment in array_literal_entries(text) {
+-        let Some(arrow_pos) = segment.find("=>") else {
++    for element in elements.iter() {
++        let ArrayElement::KeyValue(entry) = element else {
+             continue;
+         };
+-        let key = extract_string_literal(segment[..arrow_pos].trim());
+-        let value = extract_cast_value(segment[arrow_pos + 2..].trim());
+-
+-        if let (Some(k), Some(v)) = (key, value)
+-            && !k.is_empty()
+-            && !v.is_empty()
+-        {
+-            results.push((k, v));
++        let Some((key, _, _)) = super::helpers::resolved_string_literal(
++            crate::parser::unwrap_parens(entry.key),
++            content,
++        ) else {
++            continue;
++        };
++        let span = crate::parser::unwrap_parens(entry.value).span();
++        let Some(value) = content
++            .get(span.start.offset as usize..span.end.offset as usize)
++            .and_then(extract_cast_value)
++        else {
++            continue;
++        };
++        if !key.is_empty() && !value.is_empty() {
++            results.push((key.to_owned(), value));
+         }
+     }
+     results
+--- a/tests/integration/parser.rs
++++ b/tests/integration/parser.rs
+@@ -2368,3 +2368,45 @@
+         "#[\\JetBrains\\PhpStorm\\Deprecated] should trigger deprecation"
+     );
+ }
++
++#[tokio::test]
++async fn cast_array_trivia_preserves_property_and_method_sources() {
++    for (open, close) in [("[", "]"), ("array(", ")")] {
++        let php = format!(
++            r#"<?php
++class Bakery extends \Illuminate\Database\Eloquent\Model {{
++    protected $casts = {open}
++        /* 😀 'fake' => 'object', [ {{ */ 'legacy' /* key */ => /* value */ 'boolean',
++        'shared' => 'float' /* end, 'fake2' => 'object' */,
++        // 'fake3' => 'object',
++        'quality=>name' => 'string',
++    {close};
++    protected function casts(): array {{
++        return {open}
++            # 'fake4' => 'object',
++            /* 😀 field */ 'quality' => /* typed */ 'bool' /* trailing */,
++            'shared' /* key */ => 'integer',
++        {close};
++    }}
++}}
++"#
++        );
++        let backend = create_test_backend();
++        let classes = backend.parse_php(&php);
++        assert_eq!(classes.len(), 1);
++        let metadata = classes[0].laravel().unwrap();
++        assert_eq!(
++            metadata.casts_definitions,
++            vec![
++                ("legacy".to_owned(), "boolean".to_owned()),
++                ("shared".to_owned(), "integer".to_owned()),
++                ("quality=>name".to_owned(), "string".to_owned()),
++                ("quality".to_owned(), "bool".to_owned()),
++            ],
++            "comments are trivia and method casts override properties for {open}"
++        );
++        let sources = metadata.cast_sources.as_ref().unwrap();
++        assert_eq!(sources.property.len(), 3);
++        assert_eq!(sources.method.len(), 2);
++    }
++}

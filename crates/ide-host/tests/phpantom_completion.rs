@@ -5,6 +5,9 @@ use ide_host::{Host, HostConfig, Project};
 use ide_lsp::types::{CompletionItem, CompletionKind, CompletionList, GotoKind};
 use std::{io::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
+#[cfg(unix)]
+#[path = "fixtures/eloquent_navigation.rs"]
+mod eloquent_navigation;
 #[path = "fixtures/kernel_aliases.rs"]
 mod kernel_aliases;
 #[path = "fixtures/middleware_aliases.rs"]

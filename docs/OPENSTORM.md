@@ -15,6 +15,61 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Eloquent navigation slice 237 (inactive candidate193 accepted):
+Actual Host checks first reproduced two engine defects without result retries.
+The initial clean cast hover/definition passes on191; the first hover after an
+unsaved inline comment before the cast key returns null. Wire evidence confirms
+the correct dependency didChange precedes that query. Inactive192 replaces raw
+array-text splitting with AST cast entries, preserving comments, literal keys,
+short/legacy arrays and method-over-property precedence. Its full engine suite
+passes, but the unchanged Host test then exposes a byte-column declaration
+position after an emoji (39 instead of UTF-16 column37). Inactive193 converts
+both quote branches of the shared Eloquent array lookup to UTF-16 and adds an
+exact-column engine regression. No caller edit, retry or range tolerance masks
+either failure. Rejected192's binary is removed; its source and evidence remain.
+
+The original real Host regression passes twice on signed193: hover-first and
+definition-first requests, unsaved cast type/key/range changes with an unchanged
+caller, exact physical UTF-16 declarations, unrelated receiver isolation, old-key
+retirement, restart replay, discard, project reopening and unchanged disk bytes.
+Fixtures use Composer PSR-4 and pinned Laravel13.37 vendor without framework boot
+or .env creation. Six Host PHP variants and four engine Unicode variants pass
+actual PHP syntax lint. Engine193 passes18,750 release tests/17existing ignores
+plus two bounded child groups, focused regressions, both all-target Clippy modes,
+formatting, fingerprint/build/version/arm64/checksum and strict ad-hoc signing.
+The signed193 checksum is
+5b6a254415ec5e0a8c2b37dedd4a5ee8a5c4f020a1be87ab9fa4d1059e1ff9cb.
+Source acquisition/build uses the pinned193 manifest and existing reproducible
+scripts; upstream commit, archive, patch checksums and licenses are preserved.
+
+Fresh workspace formatting/all-target Clippy and5,635 Rust tests pass with266
+opt-in ignores and the same11 exclusions. Actual signed193 passes140 client/Host
+cases (75+65;completion/navigation50). The three normal Host formatter regressions
+covering84 primary scenarios also pass in that workspace run. Nineteen provenance
+tests and candidate/default source+checksum verification pass. An initial ad-hoc
+Node test invocation used an unavailable runner and executed no test; the actual
+repository Vitest command passes. Exact equality of4,258 frontend/tooling files
+with accepted236 explicitly reuses14,680 frontend tests/eight skips, types, lint,
+formatting, Knip, build and23controlled browser flows. The inherited evaluator's
+final stdout says active193; its test override selected an inactive candidate,
+not the product default (evaluation-label-note.json records this distinction).
+
+Only latest App0.1.122/default191 remain packaged and unchanged;193 is inactive
+and unbundled. Latest seven regression executables replace the previous payload
+and pass post-cleanup launch/list checks. Owned compiler output removed:30.1GiB
+workspace plus2.2GiB engine; scratch sources and rejected192 binary removed.
+Canonical sources, provenance, receipts, Workbench and stashes are preserved.
+Native GUI remains user-skipped; schema-only declarations, duplicate quoted-key
+comments, broader Eloquent/relationships/scopes/collections, performance and
+platform acceptance remain open. The inherited Darwin unwind-table warning is
+retained without a runtime performance claim. No install/notarization/publication
+or whole-area acceptance:67partial/two debugger-deferred. Promotion and packaging
+of193 are a separate next slice after this source slice is committed and pushed.
+Evidence: artifacts/checks/slice237/{acceptance,engine-summary,gates,evaluation,
+frontend-reuse,candidate193,retention,engine-retention}.json and retained original
+failure logs/wire evidence. Regression:
+crates/ide-host/tests/fixtures/eloquent_navigation.rs; patches0192/0193.
+
 Package slice 236 (local development App122 accepted):
 OpenStorm 0.1.122 packages source234 live-editor formatter freshness and source235
 input-bound before-commit formatting plans on unchanged signed PHPantom191.

@@ -1,0 +1,347 @@
+--- a/src/definition/member/declaring.rs
++++ b/src/definition/member/declaring.rs
+@@ -13,7 +13,7 @@
+ 
+ use crate::util::build_fqn;
+ 
+-use super::MemberAccessHint;
++use super::{MemberAccessHint, MemberKind};
+ 
+ impl Backend {
+     /// Follow the canonical alias declaration to its implementation, keeping
+@@ -89,6 +89,43 @@
+         None
+     }
+ 
++    /// Framework conventions cannot replace a physical member of the requested kind.
++    pub(in crate::definition) fn find_physical_member_declaration(
++        class: &ClassInfo,
++        member_name: &str,
++        access_hint: MemberAccessHint,
++        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    ) -> Option<(ClassInfo, String, MemberKind)> {
++        let kind = match access_hint {
++            MemberAccessHint::MethodCall => MemberKind::Method,
++            MemberAccessHint::PropertyAccess => MemberKind::Property,
++            MemberAccessHint::Unknown => return None,
++        };
++        let declares = |candidate: &ClassInfo| match kind {
++            MemberKind::Method => candidate.methods.iter().any(|method| {
++                !method.is_virtual
++                    && method.name_offset > 0
++                    && method.name.eq_ignore_ascii_case(member_name)
++            }),
++            MemberKind::Property => candidate.properties.iter().any(|property| {
++                !property.is_virtual && property.name_offset > 0 && property.name == member_name
++            }),
++            MemberKind::Constant => false,
++        };
++        if declares(class) {
++            return Some((class.clone(), class.fqn().to_string(), kind));
++        }
++        // Trait method precedence never excludes a same-named property.
++        let method_name = (kind == MemberKind::Method).then_some(member_name);
++        crate::inheritance::find_declaring_member_ancestor(
++            class,
++            method_name,
++            class_loader,
++            &declares,
++        )
++        .map(|(fqn, owner)| (Arc::unwrap_or_clone(owner), fqn.to_string(), kind))
++    }
++
+     /// Resolve a trait `as` alias on a class.
+     ///
+     /// If `member_name` matches a trait alias declared on the class, returns
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -369,11 +369,30 @@
+                 }
+             }
+ 
++            if !is_alias
++                && extends_eloquent_model(lookup_class, &class_loader)
++                && let Some((owner, fqn, kind)) = Self::find_physical_member_declaration(
++                    lookup_class,
++                    &effective_name,
++                    access_hint,
++                    &class_loader,
++                )
++                && let Some(location) =
++                    self.member_position_location(&fqn, uri, content, &owner, &effective_name, kind)
++            {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
++                locations.push(location);
++                continue;
++            }
++
+             // ── Timestamp constant redirect ─────────────────────────
+             // When the property name matches a timestamp column,
+             // jump straight to the CREATED_AT / UPDATED_AT constant.
+             // Base resolution sees a `CREATED_AT` a parent model overrides.
+-            if extends_eloquent_model(lookup_class, &class_loader)
++            if access_hint != MemberAccessHint::MethodCall
++                && extends_eloquent_model(lookup_class, &class_loader)
+                 && let Some(const_name) = Self::timestamp_property_to_constant(
+                     &crate::virtual_members::resolve_class_base_cached(lookup_class, &class_loader),
+                     &effective_name,
+@@ -443,7 +462,8 @@
+             // candidate before ever reaching the fallback below.  Check
+             // the array entry here, before that early-exit, so that GTD on
+             // $dates/$casts etc. still jumps to the correct string literal.
+-            if extends_eloquent_model(lookup_class, &class_loader)
++            if access_hint != MemberAccessHint::MethodCall
++                && extends_eloquent_model(lookup_class, &class_loader)
+                 && let Some(location) = self.eloquent_array_entry_location(
+                     &declaring_fqn,
+                     uri,
+@@ -578,7 +598,8 @@
+             // $fillable, $guarded, $hidden, $visible, and $appends don't
+             // have a method or property declaration.  Jump to the string
+             // literal entry inside the array property instead.
+-            if extends_eloquent_model(lookup_class, &class_loader)
++            if access_hint != MemberAccessHint::MethodCall
++                && extends_eloquent_model(lookup_class, &class_loader)
+                 && let Some(location) = self.eloquent_array_entry_location(
+                     &declaring_fqn,
+                     uri,
+@@ -663,13 +684,15 @@
+                     {
+                         return Some(vec![location]);
+                     }
+-                    if let Some(location) = self.eloquent_array_entry_location(
+-                        &fqn,
+-                        uri,
+-                        content,
+-                        &effective_name,
+-                        bounds,
+-                    ) {
++                    if access_hint != MemberAccessHint::MethodCall
++                        && let Some(location) = self.eloquent_array_entry_location(
++                            &fqn,
++                            uri,
++                            content,
++                            &effective_name,
++                            bounds,
++                        )
++                    {
+                         return Some(vec![location]);
+                     }
+                 }
+--- a/tests/integration/definition_laravel.rs
++++ b/tests/integration/definition_laravel.rs
+@@ -4788,3 +4788,212 @@
+         "comment-only key is not a declaration"
+     );
+ }
++
++#[tokio::test]
++async fn concrete_eloquent_members_precede_virtual_conventions_by_access_kind() {
++    let cases = [
++        (
++            "method",
++            "",
++            "public function /* target */ quality(): int { return 7; }",
++            "quality",
++            true,
++        ),
++        (
++            "property",
++            "",
++            "public string /* target */ $quality = 'real';",
++            "quality",
++            false,
++        ),
++        (
++            "both method",
++            "",
++            "public string $quality = 'real'; public function /* target */ quality(): int { return 7; }",
++            "quality",
++            true,
++        ),
++        (
++            "both property CRLF",
++            "",
++            "public string /* target */ $quality = 'real'; public function quality(): int { return 7; }",
++            "quality",
++            false,
++        ),
++        (
++            "timestamp property",
++            "",
++            "public string /* target */ $created_at = 'real';",
++            "created_at",
++            false,
++        ),
++        (
++            "timestamp method",
++            "",
++            "public function /* target */ created_at(): int { return 7; }",
++            "created_at",
++            true,
++        ),
++        (
++            "parent method",
++            "class Base extends \\Illuminate\\Database\\Eloquent\\Model { public function /* target */ quality(): int { return 7; } }",
++            "public string $quality = 'child';",
++            "quality",
++            true,
++        ),
++        (
++            "parent property",
++            "class Base extends \\Illuminate\\Database\\Eloquent\\Model { public string /* target */ $quality = 'parent'; }",
++            "public function quality(): int { return 7; }",
++            "quality",
++            false,
++        ),
++        (
++            "trait method",
++            "trait Value { public function /* target */ quality(): int { return 7; } }",
++            "use Value; public string $quality = 'own';",
++            "quality",
++            true,
++        ),
++        (
++            "trait property",
++            "trait Value { public string /* target */ $quality = 'trait'; }",
++            "use Value; public function quality(): int { return 7; }",
++            "quality",
++            false,
++        ),
++        (
++            "trait precedence",
++            "trait First { public function quality(): int { return 1; } }|trait Value { public function /* target */ quality(): int { return 7; } }",
++            "use First, Value { Value::quality insteadof First; }",
++            "quality",
++            true,
++        ),
++        (
++            "trait property beside excluded method",
++            "trait First { public string /* target */ $quality = 'trait'; public function quality(): int { return 1; } }|trait Value { public function quality(): int { return 7; } }",
++            "use First, Value { Value::quality insteadof First; }",
++            "quality",
++            false,
++        ),
++        (
++            "trait alias",
++            "trait Value { public function /* target */ quality(): int { return 7; } }",
++            "use Value { quality as aliasQuality; }",
++            "aliasQuality",
++            true,
++        ),
++    ];
++    for (label, preamble, body, name, method) in cases {
++        let parent = if label.starts_with("parent ") {
++            "Base"
++        } else {
++            "\\Illuminate\\Database\\Eloquent\\Model"
++        };
++        let php = format!(
++            "<?php\nnamespace App\\Models;\nclass User extends {parent} {{\n    protected $casts = ['quality' => 'bool', 'aliasQuality' => 'bool', 'created_at' => 'datetime'];\n    /* 😀 */ {body}\n}}\n"
++        );
++        let php = if label.ends_with("CRLF") {
++            php.replace('\n', "\r\n")
++        } else {
++            php
++        };
++        let caller = format!(
++            "<?php\n$user = new \\App\\Models\\User();\n/* 😀 */ $user->{name}{};\n",
++            if method { "()" } else { "" }
++        );
++        let mut files = vec![
++            ("src/Models/User.php".to_string(), php.clone()),
++            ("src/Probe.php".to_string(), caller.clone()),
++        ];
++        for declaration in preamble.split('|').filter(|value| !value.is_empty()) {
++            let class_name = declaration.split_whitespace().nth(1).unwrap();
++            files.push((
++                format!("src/Models/{class_name}.php"),
++                format!("<?php\nnamespace App\\Models;\n{declaration}\n"),
++            ));
++        }
++        let borrowed: Vec<_> = files
++            .iter()
++            .map(|(path, source)| (path.as_str(), source.as_str()))
++            .collect();
++        let (backend, dir) = make_workspace(&borrowed);
++        let prefix = &caller[..caller.find("->").unwrap() + 2];
++        let col = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++        let response = open_and_goto_definition(&backend, &dir, "src/Probe.php", &caller, 2, col)
++            .await
++            .expect(label);
++        let location = match response {
++            GotoDefinitionResponse::Scalar(location) => location,
++            GotoDefinitionResponse::Array(mut locations) => {
++                assert_eq!(locations.len(), 1, "{label}");
++                locations.pop().unwrap()
++            }
++            other => panic!("{label}: {other:?}"),
++        };
++        let marker = "/* target */ ";
++        let (target_path, target_source) = files
++            .iter()
++            .find(|(_, source)| source.contains(marker))
++            .unwrap();
++        let prefix = &target_source
++            [..target_source.find(marker).unwrap() + marker.len() + usize::from(!method)];
++        let point = Position::new(
++            prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        );
++        assert_eq!(
++            location.uri,
++            Url::from_file_path(dir.path().join(target_path)).unwrap(),
++            "{label}"
++        );
++        assert_eq!(location.range, Range::new(point, point), "{label}");
++    }
++}
++
++#[tokio::test]
++async fn concrete_eloquent_member_lookup_keeps_virtual_properties_but_not_fake_calls() {
++    let php = "<?php namespace App\\Models; class User extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['quality' => 'bool']; }";
++    for name in ["quality", "created_at"] {
++        let caller = format!("<?php\n$user = new \\App\\Models\\User();\n$user->{name}();\n");
++        let (backend, dir) =
++            make_workspace(&[("src/Models/User.php", php), ("src/Probe.php", &caller)]);
++        assert!(
++            open_and_goto_definition(&backend, &dir, "src/Probe.php", &caller, 2, 7)
++                .await
++                .is_none(),
++            "{name}() must not navigate to a virtual property"
++        );
++    }
++    for (name, method) in [("quality", false), ("whereQuality", true)] {
++        let caller = format!(
++            "<?php\n$user = new \\App\\Models\\User();\n$user->{name}{};\n",
++            if method { "()" } else { "" }
++        );
++        let (backend, dir) =
++            make_workspace(&[("src/Models/User.php", php), ("src/Probe.php", &caller)]);
++        let response = open_and_goto_definition(&backend, &dir, "src/Probe.php", &caller, 2, 7)
++            .await
++            .expect("virtual field and derived query method stay navigable");
++        assert_eq!(
++            definition_uri(&response),
++            &Url::from_file_path(dir.path().join("src/Models/User.php")).unwrap()
++        );
++        let col = php.find("'quality'").unwrap() as u32 + 1;
++        assert_eq!(definition_line(&response), 0);
++        match response {
++            GotoDefinitionResponse::Scalar(location) => assert_eq!(
++                location.range,
++                Range::new(Position::new(0, col), Position::new(0, col))
++            ),
++            GotoDefinitionResponse::Array(locations) => {
++                assert_eq!(locations.len(), 1);
++                assert_eq!(
++                    locations[0].range,
++                    Range::new(Position::new(0, col), Position::new(0, col))
++                );
++            }
++            other => panic!("unexpected {other:?}"),
++        }
++    }
++}

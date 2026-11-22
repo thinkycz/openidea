@@ -65,6 +65,62 @@ Detailed commands, initial failures, resolutions, successful gates, source hashe
 retention and delivery receipts are in artifacts/checks/upstream-20261122. Git
 history and remote read-back establish the final commit/push identity.
 
+Eloquent member precedence slice 241 (source/client accepted; inactive 195):
+Real PHP methods and properties could navigate to same-named Eloquent cast keys;
+a real timestamp property could navigate to a framework constant. Embedded 194
+reproduces five failures while hover already reports the real declarations.
+The actual Host regression fails at the cast key (line 3) instead of the method
+(line 5), then passes unchanged against signed 195. Resolve physical members of
+the requested kind before framework redirects. Search actual class/trait/parent
+ancestry, respect trait method precedence and aliases, and keep property lookup
+independent of method adaptations. Direct cast/timestamp property redirects no
+longer masquerade as method-call definitions; derived query mappings remain.
+
+The pinned source recipe adds patch 0195. The immutable acquisition/build,
+checksum, version, licenses, arm64 binary and strict ad-hoc signature verify.
+Candidate 195 stays inactive and unbundled. App 0.1.124/default 194 and its source,
+resource/provenance hashes remain unchanged. Native GUI checks stay user-skipped.
+
+Fresh engine acceptance: two focused tests cover 13 concrete declaration variants
+and virtual-property/query controls, including cross-file parent and trait targets,
+trait precedence, aliases, Unicode and CRLF. All 35 PHP fixture syntax checks and
+13 actual Laravel PSR-4 dispatch assertions pass. Full engine suite passes 18,754
+main tests / 17 ignored plus two isolated child-process tests. Both release
+all-target Clippy modes, formatting and source fingerprints pass. A test-only
+borrowed-URL assertion compile error is corrected with its failed snapshot kept.
+
+Fresh workspace acceptance: formatting and all-target Clippy pass; 5,738 tests
+pass / 269 ignored / the same 11 HTTP-confirmation and direnv exclusions. The
+initial module-order formatting check is corrected before this full rerun.
+All 142 real-engine cases pass (75 client / 67 Host), including the new direct
+Host test's first responses in both query orders, dirty target movement, unchanged
+caller/disk sources, restart and discard back to disk. Six original protocol probes
+resolve exact physical targets. The same-root 194-to-195 probe keeps all inputs
+unchanged and replaces the old cast-key target with the real method; server
+children exit. Nineteen fresh provenance tests and all 195 patch checks pass.
+
+Reuse the exact unchanged frontend from merge 55c4459c0: 15,131 tests / 11 skips,
+types, lint, formatting, Knip, build/Safari startup and 69 controlled-browser cases.
+This reuse does not establish native GUI acceptance. Existing controlled-browser
+native-API/duplicate-Markdown-key warnings and Darwin unwind-table warning remain
+recorded, with native impact/exception performance unmeasured.
+
+A separate existing gap is reproduced on both 194 and 195: a virtual cast property
+can navigate to a same-named method in another trait file, although hover correctly
+reports the bool property. Real Laravel dispatch distinguishes that property and
+method. This remains the next navigation gap, not a new acceptance claim.
+All 69 areas remain 67 partial / two debugger user-deferred. Refresh the ledger's
+upstream-sync pointer to verified f473cd992/merge55c4459c0, retaining its prior entry
+as history; the retained app still predates that source merge.
+
+Retain only the current seven regression executables and App 0.1.124. Remove the
+engine compiler output/mutable scratch after signing and Host acceptance, and the
+workspace compiler output after current-client acceptance. Preserve canonical
+sources, engines, pins, licenses, receipts, prior evaluation evidence and stashes.
+Detailed commands, failures, corrected source snapshots, checks, corpus results,
+retention and delivery receipts are in artifacts/checks/slice241. Packaging is a
+separate subsequent slice; no installed-app or notarization claim is made.
+
 Package slice 240 (local development App124 accepted):
 OpenStorm0.1.124 promotes exact signed194 and packages239effective Eloquent cast
 origins/types:comments,method precedence,last duplicate values and CRLF bounds.

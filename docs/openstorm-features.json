@@ -466,9 +466,10 @@
         "Slice237: actual Host191 dirty-comment hover failure and inactive192 byte-column declaration failure reproduced in sequence. AST cast-array entries plus shared Eloquent UTF-16 declaration columns are accepted in inactive signed193. Original no-retry Host test passes twice across both request orders, dirty type/key/location, foreign receiver, restart/discard/reopen and unchanged disks. Fresh engine18750/17ignored+2child groups/bothClippy modes;workspace5635/266ignored/same11exclusions/Clippy;140actual193 client/Host;19provenance tests. Exact4258file frontend match reuses236 checks explicitly. Only App122/default191 remain packaged;193unbundled. Latest7test binaries retained;compiler/scratch/rejected192binary removed. NativeGUI/skipped;schema-only declarations and wider Eloquent acceptance remain open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md slice237 and artifacts/checks/slice237/acceptance.json.",
         "Package238: signed arm64 local App0.1.123 promotes exact accepted193 and packages237commented-cast/UTF16 declaration fixes. Actual embedded193 passes140client/Host (75+65,completion50,no-retrycasttest) plus3formatter Host tests/84scenarios;13positive/seven negative navigation,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree intentional diagnostics,23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/build and actual normal-cfg compiler witnesses pass.6890source hashes verify only4version+3engine deltas;237workspace/Clippy/193engine evidence reused explicitly.47local lock versions only;WIT snapshots unchanged. App122 kept through acceptance then pruned;only123/latest7testexecutables remain,compiler8.6GiB/dist removed. NativeGUI/install/notarization/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package238 and artifacts/checks/slice238/post-package.json.",
         "Slice239: signed193 actual protocol/Host failures prove comment false origins,method/property mismatch,duplicate first-value/type and closedCRLF no-target. Inactive signed194 uses scoped AST literals,method precedence and last duplicate casts. New no-retry Host regression passes twice across both request orders,initial rawCRLF,six overlays,decoded/legacy keys,comment-only negatives,restart/discard and exact UTF16;original237freshness test also passes.14PHPsyntax/three actualLaravel runtime cases and same-root193->194 protocol handoff pass. Fresh engine18752/17ignored+2children/bothClippy modes,workspace5635/267ignored/same11exclusions/Clippy,141actual194 client/Host,19provenance tests pass;unchanged238frontend evidence reused explicitly. Only latest7testexecutables and unchanged App123/default193 remain;194inactive/unbundled;compiler30.1+2.2GiB/scratch removed. Broader Eloquent/dynamic/inheritance/schema/realmember/performance/nativeGUI gates remain open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md slice239 and artifacts/checks/slice239/acceptance.json.",
-        "Package240: local ad-hoc signed arm64 App0.1.124 promotes exact194 and packages239effective cast origins/type corrections. Embedded141client/Host (75+66,completion51,both strictEloquent tests),3formatter Host/84scenarios,13positive/seven negative nav,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree diagnostics and23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/nativebuild/compiler normal-cfg witnesses pass. Only4version+3engine source deltas;239Rust/engine corpus reused explicitly;47local lock versions only,WIT unchanged. App123 retained through acceptance then pruned;only124/latest7testexecutables,compiler8.6GiB/dist removed. NativeGUI/install/notary/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package240 and artifacts/checks/slice240/post-package.json."
+        "Package240: local ad-hoc signed arm64 App0.1.124 promotes exact194 and packages239effective cast origins/type corrections. Embedded141client/Host (75+66,completion51,both strictEloquent tests),3formatter Host/84scenarios,13positive/seven negative nav,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree diagnostics and23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/nativebuild/compiler normal-cfg witnesses pass. Only4version+3engine source deltas;239Rust/engine corpus reused explicitly;47local lock versions only,WIT unchanged. App123 retained through acceptance then pruned;only124/latest7testexecutables,compiler8.6GiB/dist removed. NativeGUI/install/notary/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package240 and artifacts/checks/slice240/post-package.json.",
+        "Slice241: inactive signed PHPantom195 fixes real Eloquent method/property definitions masked by cast keys or timestamp constants. Kind-specific physical ancestry preserves trait precedence and aliases. Actual194 Host RED becomes195 GREEN;35 syntax checks/13 real Laravel PSR4 dispatch assertions;18754 main engine tests/17 ignored plus2 isolated children;5738 workspace/269 ignored/same11 exclusions;142 actual client/Host cases;6 exact original protocol probes and same-root194-to195 upgrade pass. Existing frontend15131/11skip and69 controlled-browser evidence reused after exact source comparison;fresh19 provenance tests/all195patch checks pass. App124/default194 unchanged;not packaged. Native GUI skipped;67partial/2debugger-deferred. Existing virtual cast property versus same-named trait method misnavigation remains reproduced on194and195. See docs/OPENSTORM.md and slice241 receipts."
       ],
-      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer. Slice241: virtual cast-property navigation can still choose a same-named method in another trait file; actual194/195 protocol and real Laravel dispatch reproduce the gap. Native/wider field/cast acceptance remains pending."
     },
     {
       "id": "FEAT-027",
@@ -1296,7 +1297,8 @@
         "Slice237: actual Host191 dirty-comment hover failure and inactive192 byte-column declaration failure reproduced in sequence. AST cast-array entries plus shared Eloquent UTF-16 declaration columns are accepted in inactive signed193. Original no-retry Host test passes twice across both request orders, dirty type/key/location, foreign receiver, restart/discard/reopen and unchanged disks. Fresh engine18750/17ignored+2child groups/bothClippy modes;workspace5635/266ignored/same11exclusions/Clippy;140actual193 client/Host;19provenance tests. Exact4258file frontend match reuses236 checks explicitly. Only App122/default191 remain packaged;193unbundled. Latest7test binaries retained;compiler/scratch/rejected192binary removed. NativeGUI/skipped;schema-only declarations and wider Eloquent acceptance remain open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md slice237 and artifacts/checks/slice237/acceptance.json.",
         "Package238: signed arm64 local App0.1.123 promotes exact accepted193 and packages237commented-cast/UTF16 declaration fixes. Actual embedded193 passes140client/Host (75+65,completion50,no-retrycasttest) plus3formatter Host tests/84scenarios;13positive/seven negative navigation,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree intentional diagnostics,23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/build and actual normal-cfg compiler witnesses pass.6890source hashes verify only4version+3engine deltas;237workspace/Clippy/193engine evidence reused explicitly.47local lock versions only;WIT snapshots unchanged. App122 kept through acceptance then pruned;only123/latest7testexecutables remain,compiler8.6GiB/dist removed. NativeGUI/install/notarization/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package238 and artifacts/checks/slice238/post-package.json.",
         "Slice239: signed193 actual protocol/Host failures prove comment false origins,method/property mismatch,duplicate first-value/type and closedCRLF no-target. Inactive signed194 uses scoped AST literals,method precedence and last duplicate casts. New no-retry Host regression passes twice across both request orders,initial rawCRLF,six overlays,decoded/legacy keys,comment-only negatives,restart/discard and exact UTF16;original237freshness test also passes.14PHPsyntax/three actualLaravel runtime cases and same-root193->194 protocol handoff pass. Fresh engine18752/17ignored+2children/bothClippy modes,workspace5635/267ignored/same11exclusions/Clippy,141actual194 client/Host,19provenance tests pass;unchanged238frontend evidence reused explicitly. Only latest7testexecutables and unchanged App123/default193 remain;194inactive/unbundled;compiler30.1+2.2GiB/scratch removed. Broader Eloquent/dynamic/inheritance/schema/realmember/performance/nativeGUI gates remain open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md slice239 and artifacts/checks/slice239/acceptance.json.",
-        "Package240: local ad-hoc signed arm64 App0.1.124 promotes exact194 and packages239effective cast origins/type corrections. Embedded141client/Host (75+66,completion51,both strictEloquent tests),3formatter Host/84scenarios,13positive/seven negative nav,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree diagnostics and23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/nativebuild/compiler normal-cfg witnesses pass. Only4version+3engine source deltas;239Rust/engine corpus reused explicitly;47local lock versions only,WIT unchanged. App123 retained through acceptance then pruned;only124/latest7testexecutables,compiler8.6GiB/dist removed. NativeGUI/install/notary/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package240 and artifacts/checks/slice240/post-package.json."
+        "Package240: local ad-hoc signed arm64 App0.1.124 promotes exact194 and packages239effective cast origins/type corrections. Embedded141client/Host (75+66,completion51,both strictEloquent tests),3formatter Host/84scenarios,13positive/seven negative nav,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree diagnostics and23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/nativebuild/compiler normal-cfg witnesses pass. Only4version+3engine source deltas;239Rust/engine corpus reused explicitly;47local lock versions only,WIT unchanged. App123 retained through acceptance then pruned;only124/latest7testexecutables,compiler8.6GiB/dist removed. NativeGUI/install/notary/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package240 and artifacts/checks/slice240/post-package.json.",
+        "Slice241: inactive signed PHPantom195 fixes real Eloquent method/property definitions masked by cast keys or timestamp constants. Kind-specific physical ancestry preserves trait precedence and aliases. Actual194 Host RED becomes195 GREEN;35 syntax checks/13 real Laravel PSR4 dispatch assertions;18754 main engine tests/17 ignored plus2 isolated children;5738 workspace/269 ignored/same11 exclusions;142 actual client/Host cases;6 exact original protocol probes and same-root194-to195 upgrade pass. Existing frontend15131/11skip and69 controlled-browser evidence reused after exact source comparison;fresh19 provenance tests/all195patch checks pass. App124/default194 unchanged;not packaged. Native GUI skipped;67partial/2debugger-deferred. Existing virtual cast property versus same-named trait method misnavigation remains reproduced on194and195. See docs/OPENSTORM.md and slice241 receipts."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted. Slice74 closes the reproduced immediate-navigation null in source/client checks; packaged native repetition remains pending by explicit user instruction to skip native checks for now. Source234 fixes both live-editor formatter guards with lifecycle,project/settings/indent and sync-barrier regressions. Slice235 fixes the recorded before-commit stale edit path using input-bound backend plans and shared atomic application. App122 includes234/235;native GUI verification remains user-skipped. Closed non-PHP dependency/configuration inputs beyond the PHP inventory, hashing latency and cancellation guarantees remain incomplete or unmeasured. Broader project/configuration and native cases remain open."
     },
@@ -1462,40 +1464,63 @@
         "Slice237: actual Host191 dirty-comment hover failure and inactive192 byte-column declaration failure reproduced in sequence. AST cast-array entries plus shared Eloquent UTF-16 declaration columns are accepted in inactive signed193. Original no-retry Host test passes twice across both request orders, dirty type/key/location, foreign receiver, restart/discard/reopen and unchanged disks. Fresh engine18750/17ignored+2child groups/bothClippy modes;workspace5635/266ignored/same11exclusions/Clippy;140actual193 client/Host;19provenance tests. Exact4258file frontend match reuses236 checks explicitly. Only App122/default191 remain packaged;193unbundled. Latest7test binaries retained;compiler/scratch/rejected192binary removed. NativeGUI/skipped;schema-only declarations and wider Eloquent acceptance remain open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md slice237 and artifacts/checks/slice237/acceptance.json.",
         "Package238: signed arm64 local App0.1.123 promotes exact accepted193 and packages237commented-cast/UTF16 declaration fixes. Actual embedded193 passes140client/Host (75+65,completion50,no-retrycasttest) plus3formatter Host tests/84scenarios;13positive/seven negative navigation,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree intentional diagnostics,23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/build and actual normal-cfg compiler witnesses pass.6890source hashes verify only4version+3engine deltas;237workspace/Clippy/193engine evidence reused explicitly.47local lock versions only;WIT snapshots unchanged. App122 kept through acceptance then pruned;only123/latest7testexecutables remain,compiler8.6GiB/dist removed. NativeGUI/install/notarization/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package238 and artifacts/checks/slice238/post-package.json.",
         "Slice239: signed193 actual protocol/Host failures prove comment false origins,method/property mismatch,duplicate first-value/type and closedCRLF no-target. Inactive signed194 uses scoped AST literals,method precedence and last duplicate casts. New no-retry Host regression passes twice across both request orders,initial rawCRLF,six overlays,decoded/legacy keys,comment-only negatives,restart/discard and exact UTF16;original237freshness test also passes.14PHPsyntax/three actualLaravel runtime cases and same-root193->194 protocol handoff pass. Fresh engine18752/17ignored+2children/bothClippy modes,workspace5635/267ignored/same11exclusions/Clippy,141actual194 client/Host,19provenance tests pass;unchanged238frontend evidence reused explicitly. Only latest7testexecutables and unchanged App123/default193 remain;194inactive/unbundled;compiler30.1+2.2GiB/scratch removed. Broader Eloquent/dynamic/inheritance/schema/realmember/performance/nativeGUI gates remain open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md slice239 and artifacts/checks/slice239/acceptance.json.",
-        "Package240: local ad-hoc signed arm64 App0.1.124 promotes exact194 and packages239effective cast origins/type corrections. Embedded141client/Host (75+66,completion51,both strictEloquent tests),3formatter Host/84scenarios,13positive/seven negative nav,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree diagnostics and23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/nativebuild/compiler normal-cfg witnesses pass. Only4version+3engine source deltas;239Rust/engine corpus reused explicitly;47local lock versions only,WIT unchanged. App123 retained through acceptance then pruned;only124/latest7testexecutables,compiler8.6GiB/dist removed. NativeGUI/install/notary/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package240 and artifacts/checks/slice240/post-package.json."
+        "Package240: local ad-hoc signed arm64 App0.1.124 promotes exact194 and packages239effective cast origins/type corrections. Embedded141client/Host (75+66,completion51,both strictEloquent tests),3formatter Host/84scenarios,13positive/seven negative nav,17exact/17catalog-origin refs,four configured-PHP cases,121Laravel syntax/387runtime/exactthree diagnostics and23controlled browser cases pass. Fresh frontend14680/eight skips,24provenance/10packaging/resource3/Clippy/types/lint/format/Knip/nativebuild/compiler normal-cfg witnesses pass. Only4version+3engine source deltas;239Rust/engine corpus reused explicitly;47local lock versions only,WIT unchanged. App123 retained through acceptance then pruned;only124/latest7testexecutables,compiler8.6GiB/dist removed. NativeGUI/install/notary/performance/widerEloquent gates skipped or open;67partial/two debugger-deferred. Evidence:docs/OPENSTORM.md package240 and artifacts/checks/slice240/post-package.json.",
+        "Slice241: inactive signed PHPantom195 fixes real Eloquent method/property definitions masked by cast keys or timestamp constants. Kind-specific physical ancestry preserves trait precedence and aliases. Actual194 Host RED becomes195 GREEN;35 syntax checks/13 real Laravel PSR4 dispatch assertions;18754 main engine tests/17 ignored plus2 isolated children;5738 workspace/269 ignored/same11 exclusions;142 actual client/Host cases;6 exact original protocol probes and same-root194-to195 upgrade pass. Existing frontend15131/11skip and69 controlled-browser evidence reused after exact source comparison;fresh19 provenance tests/all195patch checks pass. App124/default194 unchanged;not packaged. Native GUI skipped;67partial/2debugger-deferred. Existing virtual cast property versus same-named trait method misnavigation remains reproduced on194and195. See docs/OPENSTORM.md and slice241 receipts."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     }
   ],
   "source_sha256": "1099a56789f19e555b26336df06f3aa756b52ec9e3f08d17a09ab10195c133fa",
   "upstream_sync": {
-    "commit": "a46f187428ff7dea57990403d4146000cef1d0fa",
-    "merge_base": "041e72106bde0124c6447e515b9bfd798bdd79ca",
-    "commits_since_base": 1643,
-    "source_version": "0.1.44",
-    "openstorm_version": "0.1.88",
-    "state": "merged and verified locally; branch history and remote ref record commit/push",
-    "native_acceptance": "Explicitly user-skipped; inherited upstream features are not newly accepted OpenStorm areas",
-    "evidence": "docs/OPENSTORM.md: upstream merge 2026-11-14",
+    "commit": "f473cd9927f7d19c7d9c1ee7b139eae27fffc9fe",
+    "merge_commit": "55c4459c0520c4cf7f71a5871f227782d8ba83df",
+    "merge_base": "5baaf5b7de399e9a90a1143298651fa1b3aab714",
+    "commits_since_base": 292,
+    "source_version": "0.1.50",
+    "openstorm_version": "0.1.124",
+    "state": "merged,pushed and remotely verified;source merge is not packaged",
+    "native_acceptance": "User-skipped;inherited features do not become newly accepted areas",
     "validation": {
-      "rust_passed": 4710,
-      "rust_ignored": 164,
-      "frontend_passed": 11883,
-      "frontend_skipped": 6,
-      "phpantom_host_passed": 9,
-      "phpantom_client_passed": 41,
-      "native": "user-skipped"
+      "rust_passed": 5738,
+      "rust_ignored": 268,
+      "existing_exclusions": 11,
+      "frontend_passed": 15131,
+      "frontend_skipped": 11,
+      "actual_phpantom_client": 75,
+      "actual_phpantom_host": 66,
+      "controlled_browser": 69
     },
-    "local_delivery": {
-      "bundle": "artifacts/batches/0.1.88/OpenStorm.app",
-      "profile": "development",
-      "architecture": "arm64",
-      "signature": "ad-hoc; strict/deep verified",
-      "executable_sha256": "2c3844de9063fa74b6256e7a108414f58a34accf5195e1434b9de5ba6b923efb",
-      "latest_only": true,
-      "compiler_cache": "owned artifacts/build cleaned; 23710 files/26.3GiB",
-      "installed": false,
-      "notarized": false
+    "retained_app": "artifacts/batches/0.1.124/OpenStorm.app;predates merge;hash/signature unchanged",
+    "evidence": "artifacts/checks/upstream-20261122/delivery.json;docs/OPENSTORM.md",
+    "previous_record": {
+      "commit": "a46f187428ff7dea57990403d4146000cef1d0fa",
+      "merge_base": "041e72106bde0124c6447e515b9bfd798bdd79ca",
+      "commits_since_base": 1643,
+      "source_version": "0.1.44",
+      "openstorm_version": "0.1.88",
+      "state": "merged and verified locally; branch history and remote ref record commit/push",
+      "native_acceptance": "Explicitly user-skipped; inherited upstream features are not newly accepted OpenStorm areas",
+      "evidence": "docs/OPENSTORM.md: upstream merge 2026-11-14",
+      "validation": {
+        "rust_passed": 4710,
+        "rust_ignored": 164,
+        "frontend_passed": 11883,
+        "frontend_skipped": 6,
+        "phpantom_host_passed": 9,
+        "phpantom_client_passed": 41,
+        "native": "user-skipped"
+      },
+      "local_delivery": {
+        "bundle": "artifacts/batches/0.1.88/OpenStorm.app",
+        "profile": "development",
+        "architecture": "arm64",
+        "signature": "ad-hoc; strict/deep verified",
+        "executable_sha256": "2c3844de9063fa74b6256e7a108414f58a34accf5195e1434b9de5ba6b923efb",
+        "latest_only": true,
+        "compiler_cache": "owned artifacts/build cleaned; 23710 files/26.3GiB",
+        "installed": false,
+        "notarized": false
+      }
     }
   },
   "laravel_navigation_batch": {
@@ -2186,5 +2211,40 @@
     "default_resource_active": true,
     "package_slice": 240,
     "promotion_evidence": "artifacts/checks/slice240/post-package.json"
+  },
+  "eloquent_member_precedence_candidate": {
+    "slice": 241,
+    "version": "0.11.1-openstorm.195",
+    "sha256": "f8f57f97df709f98ad349232fabe2a9e650fa7ffe069e32a6fc947a7f5f684ad",
+    "source_recipe": "engine/candidates/0.11.1-openstorm.195-source.json",
+    "source_tree": "/Users/longdo/Code/openidea/artifacts/phpantom/1756b1f920c1-39f55a79f684-verified",
+    "patch": "0195-concrete-eloquent-member-precedence.patch",
+    "active": false,
+    "packaged": false,
+    "state": "source and actual client accepted;awaiting packaging",
+    "engine_main_passed": 18754,
+    "engine_ignored": 17,
+    "isolated_child_passed": 2,
+    "actual_client_passed": 75,
+    "actual_host_passed": 67,
+    "concrete_fixture_variants": 13,
+    "php_syntax_files": 35,
+    "real_laravel_dispatch_assertions": 13,
+    "wire_positive_cases": 6,
+    "upgrade_probe": "same root,unchanged inputs,194 cast key to195 real method",
+    "fresh_provenance_tests": 19,
+    "root_workspace": {
+      "passed": 5738,
+      "failed": 0,
+      "ignored": 269,
+      "measured": 0,
+      "filtered": 11,
+      "suites": 236
+    },
+    "frontend": "exact source reuse from upstream55c4459c0;15131/11skip;types/lint/format/Knip/build/Safari;69 controlled browser cases",
+    "retained_app": "0.1.124/default194 unchanged;candidate not bundled",
+    "native_ui": "user-skipped",
+    "remaining": "Virtual cast property versus same-named trait method remains wrong on194and195;broader area gates incomplete",
+    "evidence": "artifacts/checks/slice241/acceptance.json"
   }
 }

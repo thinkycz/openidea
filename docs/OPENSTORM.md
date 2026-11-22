@@ -15,6 +15,58 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 250 (local development App 0.1.129 accepted):
+Bundle exact signed PHPantom 199 from accepted source249. Legacy getter and setter
+method casing now follows PHP/Laravel runtime behavior. Only four version files
+and three engine inputs change; all 47 local lock versions advance. Third-party
+lock entries, WIT snapshots, licenses and implementation source stay unchanged.
+Historical candidate manifests remain inactive; bundled provenance is active 199.
+
+The embedded engine passes all nine getter type/completion/exact-definition cases
+and all six setter read/write targets: 12 models, 36 syntax checks, 24 real Laravel
+assertions. Fifteen prior accessor alias controls also pass 45 syntax checks and 30
+runtime assertions. The actual Host 25-model fixture passes both request orders,
+Unicode dirty movements, string/int/string edits, restart/discard and unchanged
+caller/disk bytes. Same-root198/embedded199/reopen199 yields bool/string/string,
+correct cast/getter origins and dirty int/string results with unchanged source.
+
+All 145 actual embedded client/Host cases (75/70; completion 55) plus three normal
+formatter regressions pass. Broader checks pass 13 positive/seven negative
+navigation cases, 17 exact/17 catalog-origin references, four configured PHP cases,
+121 Laravel13.37 syntax files,387 runtime assertions and exactly three intentional
+diagnostics. All23 selected controlled-browser cases pass.
+
+Fresh gates pass 15,436 frontend tests/11 skips, types/lint/format/Knip, production
+build/Safari startup; 24 version/provenance tests; 10 packaging/pruning tests;
+three bundled-resolution tests, strict resource Clippy and Rust formatting.
+Reuse exact unchanged source249 engine 18,761 main tests / 17 ignored / two isolated
+children / both release Clippy modes and workspace 5,897 tests / 274 ignored / 13 filtered /
+strict Clippy. The 13 exclusions remain 11 established cases plus two pending
+synthetic-env worktree tests. Full source hashes tie reused evidence to this build.
+
+Actual library/executable compiler arguments prove normal app cfg with debug
+assertions off. Arm64,macOS13 minimum metadata,OpenStorm bundle identity and
+source/build receipts verify. Deep/strict ad-hoc signature remains valid after
+engine/client probes. Main-app launch, installation, native GUI, notarization and
+OS13 runtime remain untested. No real-service or whole-area parity is claimed.
+
+App128 was retained through new embedded acceptance, then pruned. Resource-check
+compiler output was removed before the app build; native compiler/staging output and
+86,209,384 bytes of frontend dist were removed after acceptance. Keep only App129
+and the latest seven regression executables. Preserve Workbench, canonical source,
+engine provenance/licenses, earlier evidence and both original stashes. Native GUI
+remains user-skipped. Wider property spellings, renamed trait aliases, visibility,
+dynamic expressions, opaque callbacks and native/service matrices remain open.
+All 69 statuses remain 67 partial / two debugger user-deferred. No new debugger
+functionality, profile migration, updater activation, notarization or public release.
+
+Latest app: artifacts/batches/0.1.129/OpenStorm.app.
+Main SHA256: a7ff96e0fdc8c7077cedca0bd1d13303e371a0fc186f5b4476594a69d449c29e.
+Embedded199 SHA256: fa3759a4dc1e38abe1a60c50bfd0c8500329de1c422754e89a0e3bf9f3def22f.
+Evidence: artifacts/checks/slice250/{input,source-match,pipeline,compiler-witness,
+embedded,client-host,alias-probe-199,probe-199,setter-199,upgrade-freshness,
+post-package,delivery}.json.
+
 Source slice 249 (accepted source/client; legacy accessor and mutator casing):
 PHPantom's legacy-name filter rejected getter/setter spellings that PHP and Laravel
 resolve case-insensitively. Correct the shared prefix/suffix filter and remove its

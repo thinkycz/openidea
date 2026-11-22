@@ -288,6 +288,8 @@ export interface ServiceProviderContribution {
   menu?(item: ServiceTreeItem): MenuItem[];
   /** Double click / Enter. */
   activate?(item: ServiceTreeItem): void;
+  /** Jump to Source (F4 / ⌘↓); a provider without it activates the node instead. */
+  jumpToSource?(item: ServiceTreeItem): void;
   /** A node of this provider became the lead selection. */
   select?(item: ServiceTreeItem): void;
   /** A node of this provider was expanded or collapsed. */
@@ -571,13 +573,30 @@ export function registerExternalFileOpenHandler(handler: ExternalFileOpenHandler
   };
 }
 
+/** Default custom editors that should open in the IDE instead of an associated app. */
+const externalOpenSuppressions = new Map<string, (path: string) => boolean>();
+
+/** Skip associated-application open for paths a default custom editor claims. */
+export function registerExternalOpenSuppression(id: string, matches: (path: string) => boolean): () => void {
+  externalOpenSuppressions.set(id, matches);
+  return () => {
+    if (externalOpenSuppressions.get(id) === matches) externalOpenSuppressions.delete(id);
+  };
+}
+
+function externalOpenSuppressed(path: string): boolean {
+  return [...externalOpenSuppressions.values()].some((matches) => matches(path));
+}
+
 /** Whether opening `path` would hand it to another application. */
 export function opensExternally(path: string): boolean {
+  if (externalOpenSuppressed(path)) return false;
   return [...externalFileOpenHandlers.values()].some((h) => h.matches(path));
 }
 
 /** Opens `path` with another application; false when no handler took it. Handler failures fall through. */
 export async function openFileExternally(path: string): Promise<boolean> {
+  if (externalOpenSuppressed(path)) return false;
   const handlers = [...externalFileOpenHandlers.values()].sort(
     (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id),
   );
@@ -603,6 +622,8 @@ export interface TextEditorWrapperContribution {
   component: ComponentType<{ path: string; tabId: string; children: ReactNode; actionsInTabs?: boolean }>;
   /** Layout controls in the tab strip; the wrapper supplies a floating fallback when tabs are hidden. */
   tabActions?: ComponentType<{ path: string; tabId: string }>;
+  /** Hook: true while the wrapper hides the source editor of `tabId` (a preview-only layout), which drops its code breadcrumbs. */
+  useSourceHidden?: (tabId: string) => boolean;
 }
 
 export const useTextEditorWrappers = create<{ wrappers: Map<string, TextEditorWrapperContribution> }>(() => ({

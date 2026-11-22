@@ -1096,7 +1096,7 @@ export class DocumentManager {
         try {
           await model.save("auto");
         } catch (e) {
-          console.warn(`autosave of ${model.path} failed`, e);
+          logError(`autosave of ${model.path} failed`, e);
         }
       }
       if (!discard && !handoff && model.getMeta().dirty && !isUntitledUri(model.path)) return;
@@ -1153,7 +1153,10 @@ export class DocumentManager {
       } catch (error) {
         if (isCancelled(error)) {
           if (reason === "explicit") throw error;
-        } else errors.push(error);
+        } else {
+          logError(`saving ${model.path} failed`, error);
+          errors.push(error);
+        }
       }
     }
     if (errors.length) {

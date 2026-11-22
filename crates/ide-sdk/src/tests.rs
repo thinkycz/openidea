@@ -6,6 +6,7 @@ use crate::apply::{
 };
 use crate::python::parse_pip_list;
 use crate::{bin_dir, exe, venv_of};
+use ide_core::CancellationToken;
 use ide_core::settings::Settings;
 use ide_language::LanguageServerConfig;
 use ide_run::RunConfig;
@@ -1750,7 +1751,15 @@ fn typescript_7_runs_its_own_language_server() {
         assert_eq!(Path::new(&cfg.command), native, "{name}");
         assert_eq!(cfg.args, ["--lsp", "--stdio"]);
         assert_eq!(cfg.display_name.as_deref(), Some("TypeScript 7"));
-        assert!(cfg.initialization_options.is_none());
+        // The tsserver-based server's options don't apply; JSX prop completion adds a value.
+        let options = serde_json::to_value(cfg.initialization_options.as_ref().unwrap()).unwrap();
+        for language in ["typescript", "javascript"] {
+            assert_eq!(
+                options[language],
+                serde_json::json!({ "preferences": { "jsxAttributeCompletionStyle": "auto" } })
+            );
+        }
+        assert_eq!(options.as_object().unwrap().len(), 2, "{options}");
     }
     // Picked as a directory (its `lib`, as for older versions), too.
     s.languages.typescript.version = modules.join("typescript/lib").to_string_lossy().into_owned();
@@ -3222,4 +3231,47 @@ fn server_command_paths_report_executables_set_for_built_in_servers() {
             ("jdtls".to_owned(), root.join("bin/jdtls")),
         ]
     );
+}
+
+#[test]
+fn unsatisfied_requirements_are_judged_by_the_interpreter() {
+    let Some(base) = crate::exec::which("python3").or_else(|| crate::exec::which("python")) else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("env");
+    // System site packages: pip's vendored `packaging` when the base has pip.
+    let status = std::process::Command::new(base)
+        .args(["-I", "-m", "venv", "--without-pip", "--system-site-packages"])
+        .arg(&home)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let python = home.join(bin_dir()).join(exe("python"));
+    let site = std::process::Command::new(&python)
+        .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
+        .output()
+        .unwrap();
+    let site = std::path::PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
+    let info = site.join("Fake.Dist_Pkg-1.0.dist-info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("METADATA"), "Metadata-Version: 2.1\nName: Fake.Dist_Pkg\nVersion: 1.0\n").unwrap();
+    let packaging = std::process::Command::new(&python)
+        .args(["-c", "import pip._vendor.packaging.requirements"])
+        .status()
+        .is_ok_and(|s| s.success());
+    let cancel = CancellationToken::new();
+    let found = crate::python::unsatisfied_requirements(
+        &python,
+        &[
+            "fake-dist-pkg",
+            "FAKE_dist.pkg>=0.5",
+            "fake-dist-pkg>=2",
+            "openidea-not-installed-xyz[extra]==1",
+            "openidea-not-installed-xyz; sys_platform == 'nowhere'",
+        ],
+        &cancel,
+    )
+    .unwrap();
+    let missing = || Some(crate::python::Unsatisfied { installed: None });
+    let old = packaging.then(|| crate::python::Unsatisfied { installed: Some("1.0".into()) });
+    assert_eq!(found, [None, None, old, missing(), None]);
 }

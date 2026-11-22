@@ -16,6 +16,7 @@ import type {
   AgentModelCatalog,
   AgentPrompt,
   AgentProvider,
+  AgentSkillMode,
   AgentTask,
   ExternalSession,
   Isolation,
@@ -26,6 +27,7 @@ import { auxiliaryWindow, windowLabel } from "@/platform/auxWindow";
 import { routeToWindow, taskWindowDraft, taskWindowFocused, updateTaskWindowDraft } from "./taskWindowRouting";
 import { clearAgentTaskFontZoom, resetAllAgentFontZoom } from "./fontZoom";
 import { clearDismissedAssets } from "./sessionAssetsModel";
+import { useSkillsCatalog } from "./skillsModel";
 import { basename, useProject } from "@/platform/project";
 import { defaultTaskProject } from "./project";
 import { call, commands, isTauri, nextRequestId } from "@/platform/ipc";
@@ -84,6 +86,8 @@ export interface Draft {
   base: string | null;
   /** Per-session MCP server enable/disable overrides (`server_name` -> `enabled`) for the next task. */
   mcpOverrides?: Record<string, boolean>;
+  /** Per-session skill modes (`skill name` -> mode) for the next task. */
+  skillOverrides?: Record<string, AgentSkillMode>;
 }
 
 /** Composer key of the New Task page; sessions use their task id. */
@@ -1037,6 +1041,8 @@ export function useAgentCommands(
   task: string | null,
   offered: readonly AgentCommand[],
 ): readonly AgentCommand[] {
+  const skillOverrides = useAgents((s) => (task ? s.tasks.get(task)?.skillOverrides : s.draft.skillOverrides));
+  const catalogSkills = useSkillsCatalog((s) => s.skills);
   const [found, setFound] = useState<{
     for: unknown[];
     list: readonly AgentCommand[];
@@ -1045,15 +1051,44 @@ export function useAgentCommands(
     if (!provider || !isTauri()) return;
     let alive = true;
     call(commands.agentCommands(provider, task))
-      .then((list) => alive && setFound({ for: [provider, task, offered], list }))
+      .then((list) => alive && setFound({ for: [provider, task, offered, skillOverrides, catalogSkills], list }))
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [provider, task, offered]);
+  }, [provider, task, offered, skillOverrides, catalogSkills]);
   // Until the list for these arguments arrives, what the agent offered.
-  const current = found && found.for[0] === provider && found.for[1] === task && found.for[2] === offered;
-  return current ? found.list : offered;
+  const current =
+    found &&
+    found.for[0] === provider &&
+    found.for[1] === task &&
+    found.for[2] === offered &&
+    found.for[3] === skillOverrides &&
+    found.for[4] === catalogSkills;
+  const base = current ? found.list : offered;
+  if (task !== null || !skillOverrides || Object.keys(skillOverrides).length === 0) return base;
+  const off = new Set(
+    Object.entries(skillOverrides)
+      .filter(([, mode]) => mode === "off")
+      .map(([name]) => name.toLowerCase()),
+  );
+  const filtered = base.filter((c) => !off.has(c.name.replace(/^\$/, "").toLowerCase()));
+  const extra: AgentCommand[] = [];
+  for (const [name, mode] of Object.entries(skillOverrides)) {
+    if (mode === "off") continue;
+    const lower = name.toLowerCase();
+    if (filtered.some((c) => c.name.replace(/^\$/, "").toLowerCase() === lower)) continue;
+    const match = catalogSkills.find((s) => s.skill.name.toLowerCase() === lower && s.origin !== "trust");
+    if (match && match.skill.userInvocable !== false) {
+      extra.push({
+        name: match.skill.name,
+        description: match.skill.description,
+        hint: match.skill.hint ?? null,
+        source: "skill",
+      });
+    }
+  }
+  return extra.length > 0 ? [...filtered, ...extra] : filtered;
 }
 
 export function openTask(task: string) {
@@ -1228,6 +1263,7 @@ export async function startTask(
         isolation,
         base: isolation === "worktree" ? draft.base : null,
         mcpOverrides: draft.mcpOverrides ?? {},
+        skillOverrides: draft.skillOverrides ?? {},
         // A `!` command runs in the new task before the agent hears anything.
         idle: command !== null,
       }),
@@ -1562,6 +1598,10 @@ export function setDraftMcpOverrides(mcpOverrides: Record<string, boolean>) {
   updateDraft({ mcpOverrides });
 }
 
+export function setDraftSkillOverrides(skillOverrides: Record<string, AgentSkillMode>) {
+  updateDraft({ skillOverrides });
+}
+
 export async function setTaskMcpOverrides(task: string, overrides: Record<string, boolean>): Promise<void> {
   const prev = useAgents.getState().tasks.get(task);
   if (prev) {
@@ -1570,6 +1610,19 @@ export async function setTaskMcpOverrides(task: string, overrides: Record<string
     }));
   }
   const updated = await call(commands.agentSetMcpOverrides(task, overrides));
+  useAgents.setState((s) => ({
+    tasks: new Map(s.tasks).set(task, updated),
+  }));
+}
+
+export async function setTaskSkillOverrides(task: string, overrides: Record<string, AgentSkillMode>): Promise<void> {
+  const prev = useAgents.getState().tasks.get(task);
+  if (prev) {
+    useAgents.setState((s) => ({
+      tasks: new Map(s.tasks).set(task, { ...prev, skillOverrides: overrides }),
+    }));
+  }
+  const updated = await call(commands.agentSetSkillOverrides(task, overrides));
   useAgents.setState((s) => ({
     tasks: new Map(s.tasks).set(task, updated),
   }));

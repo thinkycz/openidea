@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream integration (2026-11-22, upstream `f473cd992`, source acceptance verified):
+Merged 292 commits from l0ng-ai/openidea since `5baaf5b7d`: editor/navigation and
+layout fixes, Git workflows, Python console/refactoring/testing support, remote
+workspace/WSL work, SQL streaming, plugin process bounds and the Wasmtime security
+update. Preserve OpenStorm identity/version 0.1.124, disabled updates, default
+PHPantom 194 and content-revision overwrite consent. Pending Laravel member
+precedence work is preserved separately for restoration after the merge. The
+69-area ledger remains 67 partial / 2 debugger user-deferred; no broad acceptance
+or parity claim is made.
+
+Resolve shared save paths by keeping sequential overwrite decisions and explicit
+cancellation, with upstream failure logging. Keep navigation request ownership
+and cancellation with upstream foreground prioritization, and popup focus with
+sectioned rows. Regenerate bindings and the command snapshot from the reconciled
+Rust schema. New locale display labels and local build helpers use OpenStorm;
+upstream attribution, protocol names and project-configuration compatibility remain.
+Adapt smoke dependency discovery to the existing exclusion of ide-streams, and
+provide an unbound VS Code entry for the new Python console action. Keep the
+established debugger implementation, inspector source/binary and debug launch
+boundary: incoming stream tracing, automatic Java value evaluation, Java exception
+classes, table views and coupled subsystem changes remain deferred.
+
+Fresh automated acceptance: 15,131 frontend tests pass / 11 skipped; typechecking,
+lint, formatting, Knip, production build and Safari 15.4 startup checks pass. Full
+Rust workspace passes 5,738 tests / 268 ignored / the same 11 HTTP-confirmation and
+direnv exclusions. Workspace Clippy passes for all targets with warnings denied;
+Rust formatting and both generated-binding/snapshot tests pass. All 141 actual
+PHPantom 194 cases pass (75 client / 66 Host), including overwrite consent, guarded
+edits, unsaved dependencies, cancellation, restart and UTF-16 navigation. Fixture
+originals and 7,097 source-input hashes remain unchanged during acceptance.
+The three normal Host formatter regressions also pass in the workspace run.
+
+All 69 selected controlled-browser cases pass: editor, tab close, code insight,
+Laravel navigation, formatter freshness and reformat dialogs. Browser logs retain
+native-API fallback warnings and duplicate `viewers.markdown` toolbar-key warnings;
+their native impact is unverified. The inherited Darwin unwind-table linker
+warning and frontend lint/chunk warnings remain recorded. No new native GUI,
+installation, packaging or OS-version acceptance is claimed; native checks remain
+explicitly user-skipped.
+
+Only the existing App 0.1.124 remains; its main executable/engine hashes and
+strict/deep signature verify unchanged. This app predates the merge. Preserve all
+prior evaluation/source/provenance evidence and existing stashes. Replace the old
+seven regression executables with the current seven, verify their inventories and
+post-cleanup discovery, remove 30.4 GiB of compiler output and 77,380,872 bytes of
+frontend dist. No regression engine process or browser test listener remains.
+Detailed commands, initial failures, resolutions, successful gates, source hashes,
+retention and delivery receipts are in artifacts/checks/upstream-20261122. Git
+history and remote read-back establish the final commit/push identity.
+
 Package slice 240 (local development App124 accepted):
 OpenStorm0.1.124 promotes exact signed194 and packages239effective Eloquent cast
 origins/types:comments,method precedence,last duplicate values and CRLF bounds.

@@ -46,7 +46,10 @@ agent_set_command                            trusted            project_host bin
 agent_set_config                             trusted            project_host bindings async
 agent_set_env                                trusted            project_host bindings sync
 agent_set_mcp_overrides                      always             project_host bindings sync
+agent_set_skill_overrides                    always             project_host bindings sync
 agent_shell                                  trusted            project_host bindings async
+agent_skills_list                            always             project_host bindings async
+agent_skills_set_mode                        always             project_host bindings sync
 agent_stop_background                        always             project_host bindings async
 agent_subscribe                              always             project_host bindings sync
 agent_unarchive                              always             project_host bindings sync
@@ -108,6 +111,7 @@ db_disconnect                                trusted            project_host bin
 db_drop_database                             trusted            project_host bindings async
 db_dump_info                                 trusted            desktop      bindings async
 db_execute                                   trusted            project_host bindings async
+db_execute_stream                            trusted            project_host bindings async
 db_explain                                   trusted            project_host bindings async
 db_export_file                               always             desktop      bindings async
 db_finish_transaction                        trusted            project_host bindings async
@@ -120,6 +124,7 @@ db_remove_jdbc_driver                        trusted            project_host bin
 db_retain_catalog                            trusted            project_host bindings async
 db_run_tool                                  trusted            desktop      bindings async
 db_save_jdbc_driver                          trusted            project_host bindings sync
+db_save_source_visibility                    trusted            project_host bindings async
 db_save_sources                              trusted            project_host bindings async
 db_saved_catalog                             trusted            project_host bindings async
 db_schema_objects                            trusted            project_host bindings async
@@ -275,6 +280,7 @@ fs_read_text                                 always             project_host bin
 fs_rename                                    always             project_host bindings async
 fs_resolve_reference                         always             project_host bindings async
 fs_set_writable                              always             project_host bindings sync
+fs_synchronize_directories                   always             project_host bindings async
 fs_undo_delete                               always             project_host bindings async
 gh_account_repos                             trusted            desktop      bindings async
 gh_api                                       trusted            desktop      bindings async
@@ -501,7 +507,10 @@ project_trust_list                           always             project_host bin
 project_trust_remove_location                always             project_host bindings async
 project_trust_set                            always             project_host bindings async
 project_trust_status                         always             project_host bindings sync
+project_workspace_member_set                 always             project_host bindings sync
+project_workspace_members                    always             project_host bindings sync
 proxy_check_connection                       always             desktop      bindings async
+python_requirements                          trusted            project_host bindings async
 recent_files                                 always             project_host bindings sync
 recent_project_groups                        always             desktop      bindings sync
 recent_projects                              always             desktop      bindings async
@@ -565,8 +574,10 @@ run_tomcat_update                            trusted            project_host bin
 run_without_derived                          trusted            project_host bindings async
 scaffold_catalog                             always             project_host bindings sync
 scaffold_create                              always             project_host bindings async
+scaffold_free_name                           always             project_host bindings async
 scaffold_options                             always             project_host bindings async
 scaffold_requirements                        always             project_host bindings async
+scaffold_target_taken                        always             project_host bindings async
 scope_files                                  always             project_host bindings async
 sdk_container_python                         trusted            project_host bindings sync
 sdk_container_python_refresh                 trusted            project_host bindings async

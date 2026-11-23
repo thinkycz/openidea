@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "10c26f5cf752f08c7796f1ccc74792086a33040ab0015c6fce124712ceef7beb",
-  "version": "0.11.1-openstorm.201",
+  "patches_sha256": "4a01728f027f96cd51d40af6c07323ad656e280f91338c01c373365b8632bb6a",
+  "version": "0.11.1-openstorm.203",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -808,6 +808,14 @@
     {
       "file": "0201-guard-virtual-property-renames.patch",
       "sha256": "c18ff70f57629f52eeaae085cd80dd50b2cf7d0e564997f4b322080d2317a974"
+    },
+    {
+      "file": "0202-provider-view-data-argument-bindings.patch",
+      "sha256": "8a00057eb78fe94280fdebaeac5016fc9b6401df75824d9e1227e6120964bcc5"
+    },
+    {
+      "file": "0203-provider-view-data-refresh.patch",
+      "sha256": "359d6f515a0df43e18221982ec9f59c874e050b7f17f5915ed2bd37d2d62226e"
     }
   ]
 }

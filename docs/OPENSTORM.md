@@ -15,6 +15,58 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 255 (local development App 0.1.131 accepted):
+Bundle exact signed PHPantom 203 with source 254 provider argument binding and
+Blade dependency freshness. Only four version files and three engine inputs change;
+all 47 local Cargo lock versions advance. Third-party dependencies, WIT snapshots,
+application code, licenses and inactive candidate provenance remain unchanged.
+The active source/resource pin is 203; its historical candidate remains inactive.
+
+The embedded executable passes all 26 provider registrations (22 valid / four
+runtime unknown-parameter errors), 156 PHP syntax checks and all 52 template
+completion/declaration observations plus positive property hovers. Same-root prior
+201 / embedded 203 / reopen 203 replaces the missing reordered binding, updates dirty
+provider model types, retires invalid binding targets and restores declarations
+without disk edits. Actual Host checks retain dirty Unicode providers/composers,
+old-member removal, exact UTF16 origins, restart replay and discard recovery.
+
+All 148 actual embedded client/Host cases (75/73; completion 58) plus three normal
+formatter regressions pass, including save-conflict protection and guarded edit/
+rename/history behavior. Broader embedded checks pass 13 positive/seven negative
+navigation cases, 17 exact/17 catalog-origin references, four configured PHP cases,
+121 Laravel 13.37 syntax files, 387 runtime assertions and exactly three intentional
+diagnostics. All 23 selected controlled-browser cases pass.
+
+Fresh package gates pass 15,436 frontend tests/11 skips, types/lint/format/Knip,
+production build/Safari startup, 24 version/provenance, ten packaging/pruning and
+three resource-resolution tests, strict resource Clippy and Rust formatting.
+Source hashes verify reuse of source 254 engine 18,766 main/17 ignored/two isolated
+children/both strict release Clippy modes and workspace 5,897 Rust/277 ignored/same
+13 exclusions/strict workspace Clippy. The 13 exclusions remain 11 established
+plus two pending synthetic-env worktree cases. Actual application compiler arguments
+prove normal application cfg and debug assertions off. Arm64, OpenStorm identity,
+macOS 13 minimum metadata, source/build receipts and deep/strict ad-hoc signatures
+verify before and after embedded checks. Main-app launch, installation, native GUI,
+notarization and OS 13 runtime remain untested.
+The development linker reports the same compact-unwind/__eh_frame size warning
+as App130; exception-handling performance impact remains unmeasured.
+
+App130 was retained through replacement acceptance, then removed. Resource-check,
+native compiler/staging output and 86,209,384 bytes of frontend dist
+are removed; only App131 and the latest seven regression executables remain.
+Preserve Workbench, canonical sources/engines, licenses/provenance, earlier evidence
+and both original stashes. Native GUI stays user-skipped. Nested callbacks/shadowing,
+omitted defaults, dynamic/unpacked bindings, indirect dependencies and broader
+concurrency/performance/platform/service matrices remain partial. All 69 statuses
+remain 67 partial/two debugger user-deferred. No debugger expansion, migration,
+updater activation, app publishing or deployment.
+
+Latest app: artifacts/batches/0.1.131/OpenStorm.app.
+Main SHA256: 1d46f9e766a52a4e57d5d6598e6baf74ef59580b0567c9cb719502fb6e299b47.
+Embedded 203 SHA256: 284d4c1eabfbf0dd91531b261eb78374db0ebca586fb64bf0b643646d79a06c4.
+Evidence: artifacts/checks/slice255/{input,source-match,pipeline,compiler-witness,
+embedded,probe-203,provider-upgrade,client-host,post-package,delivery}.json.
+
 Source slice 254 (accepted source/client; provider argument bindings and Blade freshness):
 PHPantom now binds share/composer/composers and composer with-body arguments by
 PHP parameter slots. Preserve case-sensitive names, value-expression offsets,

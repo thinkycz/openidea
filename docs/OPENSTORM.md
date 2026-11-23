@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 252 (accepted source/client; refuse unsupported virtual-property renames):
+Checked rename on 200 offered 50 property-entry plans across 25 runtime-valid PHP/Laravel
+models. Applying plans only to fresh owned copies broke runtime behavior in 36 cases;
+14 controls preserved it. Guard unsupported transformations in prepare and the shared
+standard/checked edit-producing path. Reuse receiver resolution and physical-member
+visibility; inspect Laravel accessor/mutator and relationship bindings statically.
+Refuse legacy getter/setter, snake-mapped modern, cast/default-only and magic-dispatch
+collision cases that need additional binding transformations. Retain the 14 tested
+modern camel-name, relationship and physical-property controls, including nonpublic
+physical-only access. Do not execute application PHP during inspection.
+
+Engine API RED reproduces the unsupported legacy prepare; GREEN checks 25 models and
+both names through prepare/standard/checked. On signed 201 all 36 unsafe plans refuse;
+all 14 offered plans preserve real Laravel runtime behavior. Actual 200 Host RED fails
+at the intended prepare assertion. The new real Host regression covers all 25 models,
+direct rename bypass attempts, dirty UTF16 caller overlays, refusal without buffer/disk
+changes, and supported guarded apply plus undo/redo with runtime and syntax checks.
+All 147 actual client/Host cases (75/72; completion 57) plus three normal formatter
+regressions pass. Previous trait navigation remains correct in seven same-file and
+12 cross-file models (all 24 read/write targets; types/completion unchanged). All 23
+selected controlled-browser checks pass. This is bounded property-entry acceptance;
+method/declaration starters, other alias graphs, arbitrary names, opaque/dynamic
+bindings, migration/schema rewrites and wider rename matrices remain partial.
+
+Fresh engine gates pass 18,763 main tests / 17 ignored / two isolated children, focused API,
+format/checksum/fingerprint/build and both strict release Clippy modes. Editor gates
+pass 5,897 Rust / 276 ignored / same 13 exclusions, strict workspace Clippy, 15,436 frontend /
+11 skips, types/lint/format/Knip, production build/Safari startup and 19 provenance tests.
+Direct Cargo test-profile symbol stripping retains debug assertions/overflow checks;
+compiler-event profiles and exact source fingerprints are recorded. No toolchain shim.
+
+Signed 201 remains inactive and unbundled. App 0.1.129/default 199 stays byte-identical
+and the sole packaged app, with deep/strict signature verification. This source slice
+closes the specified packaging hold; the next cohesive app build must include 200's
+navigation fix plus 201's guard and run packaged non-GUI checks before adoption.
+Owned compiler/dist and duplicate scratch outputs are removed after acceptance;
+only the latest seven regression executables remain. Preserve canonical engines/
+sources/provenance/licenses, Workbench, earlier evidence and both original stashes.
+Native GUI remains user-skipped. All 69 statuses remain 67 partial / two debugger-deferred.
+
+Candidate 201 SHA256: 27731c75b3f72818c861a9885e79b73aa6167962dd7db06b16d01edca3b28f1e.
+Source fingerprint: 10c26f5cf752f08c7796f1ccc74792086a33040ab0015c6fce124712ceef7beb.
+Evidence: artifacts/checks/slice252/{red-inputs,freeze,engine-gates,matrix-200,
+matrix-201,cross-201,probe-201,actual200-host-red,evaluation,final-gates,
+retention,acceptance,delivery}.json.
+
 Source slice 251 (accepted source/client; trait accessor declaration origins):
 PHPantom 199 infers types and completes renamed trait getter/setter properties correctly but
 navigates to a cast entry or no declaration. Reuse the existing concrete method

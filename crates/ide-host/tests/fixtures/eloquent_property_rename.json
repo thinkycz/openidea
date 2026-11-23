@@ -1,0 +1,437 @@
+[
+  {
+    "name": "legacy",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "legacy_snake",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } }"
+    },
+    "property": "quality_label",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->quality_label;\n/* \ud83d\ude00 write */ $b->quality_label = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "legacy_upper",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as GETQualityLabelATTRIBUTE; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "legacy_nested",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/NestedQuality.php": "<?php namespace App\\Models; trait NestedQuality { use QualitySource { sourceQuality as intermediateQuality; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use NestedQuality { intermediateQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "modern",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ public function sourceQuality(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): string => 'real'); } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as qualityLabel; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [
+      "renamedQualityLabel"
+    ]
+  },
+  {
+    "name": "modern_snake",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ public function sourceQuality(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): string => 'real'); } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as qualityLabel; } }"
+    },
+    "property": "quality_label",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->quality_label;\n/* \ud83d\ude00 write */ $b->quality_label = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "modern_nested",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ public function sourceQuality(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): string => 'real'); } } ",
+      "app/Models/NestedQuality.php": "<?php namespace App\\Models; trait NestedQuality { use QualitySource { sourceQuality as intermediateQuality; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use NestedQuality { intermediateQuality as qualityLabel; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [
+      "renamedQualityLabel"
+    ]
+  },
+  {
+    "name": "setter",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality($value): void { $this->attributes['qualityLabel'] = '1'; } }",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as setQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "bool",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": true,
+    "callable": "setQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "setter_upper",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality($value): void { $this->attributes['quality_label'] = '1'; } }",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as SETQualityLabelATTRIBUTE; } protected $casts = ['quality_label'=>'bool']; }"
+    },
+    "property": "quality_label",
+    "expected_type": "bool",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": true,
+    "callable": "SETQualityLabelATTRIBUTE",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->quality_label;\n/* \ud83d\ude00 write */ $b->quality_label = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "legacy_own_override",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; public function getQualityLabelAttribute(): int { return 7; } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "int",
+    "definition_file": "app/Models/Bakery.php",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "modern_own_override",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ public function sourceQuality(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): string => 'real'); } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as qualityLabel; } protected $casts = ['qualityLabel'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<int, never> */ public function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): int => 7); } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "int",
+    "definition_file": "app/Models/Bakery.php",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "setter": false,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [
+      "renamedQualityLabel"
+    ]
+  },
+  {
+    "name": "physical_property_wins",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; public bool $qualityLabel = true; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "bool",
+    "definition_file": "app/Models/Bakery.php",
+    "definition_name": "qualityLabel",
+    "physical": true,
+    "setter": false,
+    "callable": null,
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [
+      "renamedQualityLabel",
+      "renamed_quality_label"
+    ]
+  },
+  {
+    "name": "modern_own_without_alias",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ public function sourceQuality(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): string => 'real'); } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model {  protected $casts = ['qualityLabel'=>'bool']; /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<int, never> */ public function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): int => 7); } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "int",
+    "definition_file": "app/Models/Bakery.php",
+    "definition_name": "qualityLabel",
+    "physical": false,
+    "setter": false,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [
+      "renamedQualityLabel"
+    ]
+  },
+  {
+    "name": "legacy_own_without_alias",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model {  protected $casts = ['qualityLabel'=>'bool']; public function getQualityLabelAttribute(): int { return 7; } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "int",
+    "definition_file": "app/Models/Bakery.php",
+    "definition_name": "getQualityLabelAttribute",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "plain_php_physical",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery  { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; public bool $qualityLabel = true; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "bool",
+    "definition_file": "app/Models/Bakery.php",
+    "definition_name": "qualityLabel",
+    "physical": true,
+    "setter": false,
+    "callable": null,
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [
+      "renamedQualityLabel",
+      "renamed_quality_label"
+    ]
+  },
+  {
+    "name": "private_outside",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; private bool $qualityLabel = true; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "protected_outside",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; protected bool $qualityLabel = true; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": []
+  },
+  {
+    "name": "modern_with_legacy_setter",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { /** @return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never> */ public function sourceQuality(): \\Illuminate\\Database\\Eloquent\\Casts\\Attribute { return \\Illuminate\\Database\\Eloquent\\Casts\\Attribute::get(fn(): string => 'real'); }  public function sourceSetterQuality($value): void { $this->attributes['written'] = 'yes'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as qualityLabel; sourceSetterQuality as setQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": true,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "marker": true,
+    "allowed_new_names": []
+  },
+  {
+    "name": "private_inside",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; private bool $qualityLabel = true; public function readLocal(): bool { return $this->qualityLabel; } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "query_file": "app/Models/Bakery.php",
+    "local": true,
+    "allowed_new_names": []
+  },
+  {
+    "name": "protected_inside",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { use QualitySource { sourceQuality as getQualityLabelAttribute; } protected $casts = ['qualityLabel'=>'bool']; protected bool $qualityLabel = true; public function readLocal(): bool { return $this->qualityLabel; } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "query_file": "app/Models/Bakery.php",
+    "local": true,
+    "allowed_new_names": []
+  },
+  {
+    "name": "private_physical_only",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { private bool $qualityLabel = true; public function readLocal(): bool { return $this->qualityLabel; } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->readLocal();\n",
+    "query_file": "app/Models/Bakery.php",
+    "local_only": true,
+    "allowed_new_names": [
+      "renamedQualityLabel",
+      "renamed_quality_label"
+    ]
+  },
+  {
+    "name": "protected_physical_only",
+    "files": {
+      "app/Models/QualitySource.php": "<?php namespace App\\Models; trait QualitySource { public function sourceQuality(): string { return 'real'; } } ",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected bool $qualityLabel = true; public function readLocal(): bool { return $this->qualityLabel; } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n$b->readLocal();\n",
+    "query_file": "app/Models/Bakery.php",
+    "local_only": true,
+    "allowed_new_names": [
+      "renamedQualityLabel",
+      "renamed_quality_label"
+    ]
+  },
+  {
+    "name": "relationship",
+    "files": {
+      "app/Models/FakeQualityRelation.php": "<?php namespace App\\Models; class FakeQualityRelation extends \\Illuminate\\Database\\Eloquent\\Relations\\HasMany { public function __construct() {} public function getResults() { return new \\Illuminate\\Database\\Eloquent\\Collection([7]); } }",
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { public function qualityLabel(): \\Illuminate\\Database\\Eloquent\\Relations\\HasMany { return new FakeQualityRelation(); } }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "qualityLabel",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "relation": true,
+    "allowed_new_names": [
+      "renamedQualityLabel",
+      "renamed_quality_label"
+    ]
+  },
+  {
+    "name": "cast_only",
+    "files": {
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $casts = ['qualityLabel'=>'bool']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [],
+    "defaults": false
+  },
+  {
+    "name": "attribute_default_only",
+    "files": {
+      "app/Models/Bakery.php": "<?php namespace App\\Models; class Bakery extends \\Illuminate\\Database\\Eloquent\\Model { protected $attributes = ['qualityLabel'=>'real']; }"
+    },
+    "property": "qualityLabel",
+    "expected_type": "string",
+    "definition_file": "app/Models/QualitySource.php",
+    "definition_name": "sourceQuality",
+    "physical": false,
+    "setter": false,
+    "callable": "getQualityLabelAttribute",
+    "caller": "<?php\n$b=new \\App\\Models\\Bakery();\n/* \ud83d\ude00 read */ $b->qualityLabel;\n/* \ud83d\ude00 write */ $b->qualityLabel = '1';\n",
+    "allowed_new_names": [],
+    "defaults": true
+  }
+]

@@ -14,6 +14,9 @@ mod eloquent_member_precedence;
 #[path = "fixtures/eloquent_navigation.rs"]
 mod eloquent_navigation;
 #[cfg(unix)]
+#[path = "fixtures/eloquent_property_rename.rs"]
+mod eloquent_property_rename;
+#[cfg(unix)]
 #[path = "fixtures/eloquent_trait_accessors.rs"]
 mod eloquent_trait_accessors;
 #[cfg(unix)]

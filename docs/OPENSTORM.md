@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 253 (local development App 0.1.130 accepted):
+Bundle exact signed PHPantom 201 with source 251 trait accessor declaration origins
+and source 252 virtual-property rename guards. Only four version files and three
+engine inputs change; all 47 local lock versions advance. Third-party dependencies,
+WIT snapshots, implementation source, licenses and inactive candidate manifests
+remain unchanged. Bundled provenance is active 201.
+
+The embedded executable refuses all 36 tested unsafe property-entry plans and keeps
+all 14 runtime-preserving controls across 25 models/two proposed names. Seven
+same-file and 12 cross-file trait models retain types/completions and all 24 read/
+write declaration targets. Same-root prior 199/embedded 201/reopen 201 changes cast
+origins to physical trait methods while preserving string types, dirty int/string
+freshness and original source bytes. The real Host 25-model regression passes
+dirty UTF16 callers, direct-bypass refusals, unchanged buffers/disk and supported
+guarded apply plus runtime/syntax-checked undo/redo.
+
+All 147 actual embedded client/Host cases (75/72; completion 57) plus three normal
+formatter regressions pass. Existing save-conflict consent remains protected.
+Broader embedded checks pass 13 positive/seven negative navigation cases, 17 exact/
+17 catalog-origin references, four configured PHP cases, 121 Laravel 13.37 syntax
+files, 387 runtime assertions and exactly three intentional diagnostics. All 23
+selected controlled-browser cases pass.
+
+Fresh package gates pass 15,436 frontend tests/11 skips, types/lint/format/Knip,
+production build/Safari startup, 24 version/provenance, ten packaging/pruning and
+three bundled-resolution tests, strict resource Clippy and Rust formatting.
+Full source hashes verify reuse of source 252 engine 18,763 main / 17 ignored / two
+isolated children/both release Clippy configurations, and workspace 5,897 Rust /
+276 ignored / same 13 filtered / strict workspace Clippy. The 13 exclusions remain the
+11 established cases plus two pending synthetic-env worktree cases. Actual library/
+executable compiler arguments verify normal application cfg with debug assertions
+off. Arm64, OpenStorm identity, macOS 13 minimum metadata, source/build receipts and
+deep/strict ad-hoc signatures verify before and after embedded checks. Main-app
+launch, installation, native GUI, notarization and OS 13 runtime remain untested.
+The development linker reports the same compact-unwind/__eh_frame size warning
+as App129; exception-handling performance impact remains unmeasured.
+
+Retain App129 through replacement acceptance, then remove it. Resource-check,
+native compiler/staging output and 86,209,384 bytes of frontend dist
+are removed; only App130 and the latest seven regression executables remain.
+Preserve Workbench, canonical source/engines, provenance/licenses, earlier evidence
+and both original stashes. Native GUI remains user-skipped. Other rename starters/
+names/alias graphs, schema transformations, ambiguous/opaque bindings and wider
+native/service matrices remain partial. All 69 statuses stay 67 partial/two debugger
+user-deferred. No new debugger, profile migration, updater activation or publishing.
+
+Latest app: artifacts/batches/0.1.130/OpenStorm.app.
+Main SHA256: 30e5798a3f573530a02ea69b1dc2dc11abbd7c83bd2829e981a0291c7247bf7f.
+Embedded 201 SHA256: 27731c75b3f72818c861a9885e79b73aa6167962dd7db06b16d01edca3b28f1e.
+Evidence: artifacts/checks/slice253/{input,source-match,pipeline,compiler-witness,
+embedded,matrix-201,probe-201,cross-201,upgrade-freshness,client-host,
+post-package,delivery}.json.
+
 Source slice 252 (accepted source/client; refuse unsupported virtual-property renames):
 Checked rename on 200 offered 50 property-entry plans across 25 runtime-valid PHP/Laravel
 models. Applying plans only to fresh owned copies broke runtime behavior in 36 cases;

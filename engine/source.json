@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "6f0ae1a24a84a6e48510f08aea133feaea2d280621d5494c7fe562ed50d9da07",
-  "version": "0.11.1-openstorm.199",
+  "patches_sha256": "10c26f5cf752f08c7796f1ccc74792086a33040ab0015c6fce124712ceef7beb",
+  "version": "0.11.1-openstorm.201",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -800,6 +800,14 @@
     {
       "file": "0199-legacy-accessor-method-casing.patch",
       "sha256": "e6ee5bedee9d34920fedb394078ced7b159f8ba97b3172afbede2bd7e0e89fba"
+    },
+    {
+      "file": "0200-trait-accessor-declaration-origins.patch",
+      "sha256": "7d175d1cf70e1aff5424faa16afd7ca946bc11b050a5f81317ba248cac5dd17a"
+    },
+    {
+      "file": "0201-guard-virtual-property-renames.patch",
+      "sha256": "c18ff70f57629f52eeaae085cd80dd50b2cf7d0e564997f4b322080d2317a974"
     }
   ]
 }

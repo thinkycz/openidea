@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 251 (accepted source/client; trait accessor declaration origins):
+PHPantom 199 infers types and completes renamed trait getter/setter properties correctly but
+navigates to a cast entry or no declaration. Reuse the existing concrete method
+origin resolver for accessor and mutator property navigation. Follow nested aliases
+to original physical methods, retaining class overrides and real-property priority.
+Cast/default/schema-backed mutators use the resolved accessor convention fallback
+when a camel spelling has no direct mutator entry. No type, settings or IPC changes.
+
+Seven same-file getter variants pass 21 syntax / 14 Laravel assertions but reproduce
+seven missed definitions on 199, all corrected on 200. Twelve cross-file models pass 50 syntax checks and
+35 real Laravel value/type/Reflection-owner assertions. All 12 types/completions are
+correct on both engines. The 18 alias read/write targets fail on 199; all six own-method
+and physical-property control targets pass. On signed candidate 200 all 24 targets
+pass. Cases include legacy/cased/modern getter aliases, nested aliases, setter aliases,
+class overrides and physical-property precedence. Engine integration RED reproduces
+the wrong cast URI, then passes through actual parser/resolver/navigation paths.
+The first probe reused a read column for a longer write comment; retain its invalid
+receipt separately. The corrected probe calculates each UTF16 cursor independently;
+only corrected observations establish the before/after counts above.
+
+The new actual Host regression covers 12 models in both request orders, exact file
+and UTF16 positions, dirty Unicode movement, getter string/int/string, restart,
+discard and unchanged caller/disk bytes. The actual199 Host failure passes on200.
+Same-root199/200/reopen200 retains string types while declaration origins change
+from model cast to trait method; dirty int/string changes pass without disk edits.
+All 146 actual client/Host cases (75/71; completion56) plus three normal formatter
+regressions pass. All 23 selected controlled-browser cases pass.
+
+Fresh engine gates pass 18,762 main tests / 17 ignored / two isolated children, focused
+integration, formatting, checksum/fingerprint checks and both strict release Clippy
+modes. Fresh editor gates pass 5,897 Rust tests / 275 ignored / 13 filtered, strict
+workspace Clippy, 15,436 frontend tests / 11 skips, types/lint/format/Knip, production
+build/Safari startup and 19 provenance tests. The 13 exclusions remain 11 established
+cases plus two pending synthetic-env worktree cases. Test artifacts use direct Cargo
+profile settings to strip symbols with assertions and overflow checks retained;
+actual compiler-event profiles are recorded. No toolchain shim is installed.
+
+Candidate 200 is inactive and unbundled. App 0.1.129/default199 stays byte-identical,
+the sole packaged app, with deep/strict signature verified. Remove owned compiler
+output and frontend dist after acceptance; retain only the latest seven regression
+executables. The duplicate engine working copy was removed after matching the
+preserved pinned source. Preserve Workbench, canonical engines/sources, provenance/licenses,
+earlier evidence and both original stashes. Native GUI remains user-skipped.
+Before packaging, refuse the unsupported property rename plans described below.
+Wider alias references/rename, visibility, ambiguous/invalid trait composition, dynamic/opaque callbacks and native/service
+matrices remain unverified. All 69 statuses remain 67 partial / two debugger user-deferred.
+
+Additional bounded checks compare checked-rename plans on 199/200 without editing
+existing files. Four case plans are unchanged. Applying those plans only to fresh
+owned copies preserves modern-alias and physical-property controls, but legacy
+getter/setter virtual-property plans break real Laravel value/type behavior on
+both engines. This failure reproduces on both baseline199 and candidate200. Keep
+FEAT-016 partial and guard/refuse these unsupported plans in the next source
+slice before producing another app. Do not count identical unsafe plans as
+rename acceptance. Runtime proof: rename-safety.json and rename-runtime.json.
+
+Candidate 200 SHA256: 2c2d25fd70bcc05ab95d2d113cc91980ab251bd64fbcf8369cec02a85e325e42.
+Source fingerprint: 4889a968007c4fe9b1fd7d9754c1f93a118b4ec6796c0dff303732667121e6e2.
+Evidence: artifacts/checks/slice251/{red-inputs,engine-red,engine-gates,cross-199,
+cross-200,upgrade-freshness,actual199-host-red,evaluation,workspace-strip-profile,
+final-gates,retention,acceptance,delivery}.json.
+
 Package slice 250 (local development App 0.1.129 accepted):
 Bundle exact signed PHPantom 199 from accepted source249. Legacy getter and setter
 method casing now follows PHP/Laravel runtime behavior. Only four version files

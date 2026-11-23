@@ -1,0 +1,440 @@
+--- a/src/virtual_members/laravel/view_data.rs
++++ b/src/virtual_members/laravel/view_data.rs
+@@ -99,9 +99,15 @@
+     }
+ 
+     if method.eq_ignore_ascii_case(b"composer") {
+-        let mut args = argument_list.arguments.iter();
+-        let views = view_patterns(args.next()?.value(), content, scope);
+-        let handler = args.next()?.value();
++        if !known_named_arguments(argument_list, &["views", "callback"]) {
++            return None;
++        }
++        let views = view_patterns(
++            crate::call_args::argument_for_slot(argument_list, 0, "views")??,
++            content,
++            scope,
++        );
++        let handler = crate::call_args::argument_for_slot(argument_list, 1, "callback")??;
+         let composer = composer_for_handler(views, handler, content, scope, file_path, resolved)?;
+         return Some(ViewDataRegistration::Composers(vec![composer]));
+     }
+@@ -201,6 +207,14 @@
+         if s.value.is_some_and(|value| value.eq_ignore_ascii_case(b"view")))
+ }
+ 
++/// Unknown named parameters cannot bind these non-variadic framework methods.
++fn known_named_arguments(arguments: &ArgumentList<'_>, names: &[&str]) -> bool {
++    arguments.arguments.iter().all(|argument| match argument {
++        Argument::Named(argument) => names.contains(&bytes_to_str(argument.name.value)),
++        Argument::Positional(_) => true,
++    })
++}
++
+ /// The variables a `share(…)` / `with(…)` argument list declares: either a
+ /// `('key', $value)` pair or a `['key' => $value, …]` array.
+ fn collect_data_vars(
+@@ -210,8 +224,13 @@
+     file: &Path,
+     out: &mut Vec<SharedViewVar>,
+ ) {
+-    let mut args = argument_list.arguments.iter();
+-    let Some(first) = args.next() else {
++    if !known_named_arguments(argument_list, &["key", "value"]) {
++        return;
++    }
++    let Some(Some(key)) = crate::call_args::argument_for_slot(argument_list, 0, "key") else {
++        return;
++    };
++    let Some(value) = crate::call_args::argument_for_slot(argument_list, 1, "value") else {
+         return;
+     };
+     let mut push = |name: String, value: &Expression<'_>| {
+@@ -222,17 +241,17 @@
+         });
+     };
+ 
+-    if let Some(value) = args.next() {
+-        if let Some(name) = data_key(first.value(), content, scope) {
+-            push(name, value.value());
+-        }
+-        return;
+-    }
+-
+-    let elements = match first.value() {
++    let elements = match key {
+         Expression::Array(array) => &array.elements,
+         Expression::LegacyArray(array) => &array.elements,
+-        _ => return,
++        _ => {
++            if let Some(value) = value
++                && let Some(name) = data_key(key, content, scope)
++            {
++                push(name, value);
++            }
++            return;
++        }
+     };
+     for element in elements.iter() {
+         if let ArrayElement::KeyValue(kv) = element
+@@ -324,10 +343,14 @@
+     file: &Path,
+     resolved: &OwnedResolvedNames,
+ ) -> Vec<ViewComposer> {
+-    let Some(first) = argument_list.arguments.iter().next() else {
++    if !known_named_arguments(argument_list, &["composers"]) {
+         return Vec::new();
+-    };
+-    let elements = match first.value() {
++    }
++    let Some(Some(first)) = crate::call_args::argument_for_slot(argument_list, 0, "composers")
++    else {
++        return Vec::new();
++    };
++    let elements = match first {
+         Expression::Array(array) => &array.elements,
+         Expression::LegacyArray(array) => &array.elements,
+         _ => return Vec::new(),
+--- a/src/virtual_members/laravel/view_data_tests.rs
++++ b/src/virtual_members/laravel/view_data_tests.rs
+@@ -265,3 +265,63 @@
+         vec!["menu"]
+     );
+ }
++
++#[test]
++fn named_provider_view_data_bindings_preserve_runtime_slots() {
++    let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
++        "../../../tests/integration/fixtures/named_view_provider_arguments.json"
++    ))
++    .unwrap();
++    for case in cases {
++        let content = format!(
++            "<?php class ViewServiceProvider {{ function boot(): void {{ {} }} }}",
++            case["call"].as_str().unwrap()
++        );
++        let resources = scan(&content);
++        let expected = case["expected"].as_bool().unwrap();
++        if !expected {
++            assert!(
++                resources.shared_view_vars.is_empty() && resources.view_composers.is_empty(),
++                "{} invalid bindings must expose nothing",
++                case["name"]
++            );
++        } else if case["scope"] == "shared" {
++            assert_eq!(resources.shared_view_vars.len(), 1, "{}", case["name"]);
++            let value = &resources.shared_view_vars[0];
++            assert_eq!(value.name, "item", "{}", case["name"]);
++            assert!(
++                expression_at(&content, value.offset).starts_with("new \\App\\Item("),
++                "{} must retain the key's value expression, not a reordered argument or ignored value",
++                case["name"]
++            );
++            assert!(resources.view_composers.is_empty());
++        } else {
++            assert_eq!(resources.view_composers.len(), 1, "{}", case["name"]);
++            let composer = &resources.view_composers[0];
++            assert_eq!(composer.views, ["profile"], "{}", case["name"]);
++            if case["name"] == "composer_class_named_reordered"
++                || case["name"] == "composers_named_table"
++            {
++                assert!(
++                    composer
++                        .class
++                        .as_deref()
++                        .is_some_and(|class| class.ends_with("App\\Composer")),
++                    "{}: {:?}",
++                    case["name"],
++                    composer.class
++                );
++            } else {
++                assert_eq!(composer.inline.len(), 1, "{}", case["name"]);
++                assert_eq!(composer.inline[0].name, "item");
++                assert!(
++                    expression_at(&content, composer.inline[0].offset)
++                        .starts_with("new \\App\\Item("),
++                    "{}",
++                    case["name"]
++                );
++            }
++            assert!(resources.shared_view_vars.is_empty());
++        }
++    }
++}
+--- a/tests/integration/blade_shared_vars.rs
++++ b/tests/integration/blade_shared_vars.rs
+@@ -459,4 +459,87 @@
+             "unknown later write must not offer exhaustive prior members: {labels:?}"
+         );
+     }
++
++    #[tokio::test]
++    async fn named_provider_bindings_keep_template_types_and_exact_member_origins() {
++        let cases: Vec<serde_json::Value> =
++            serde_json::from_str(include_str!("fixtures/named_view_provider_arguments.json"))
++                .unwrap();
++        let model =
++            "<?php\nnamespace App;\nclass Item { /* 😀 */ public string $itemOnly='item'; }\n";
++        let template = "{{-- 😀 provider --}}\n{{ $item->itemOnly }}\n";
++        let composer = "<?php namespace App; class Composer {public function compose($view):void {$view->with(value:new Item(),key:'item');}}";
++        for case in cases {
++            let provider = format!(
++                "<?php namespace App\\Providers; use Illuminate\\Support\\Facades\\View; class ViewServiceProvider {{ function boot():void {{ {} }} }}",
++                case["call"].as_str().unwrap()
++            );
++            let (backend, dir) = create_psr4_workspace(
++                COMPOSER_JSON,
++                &[
++                    ("bootstrap/providers.php", PROVIDERS_PHP),
++                    ("app/Providers/ViewServiceProvider.php", &provider),
++                    ("app/Item.php", model),
++                    (
++                        "app/Other.php",
++                        "<?php namespace App; class Other {public int $otherOnly=7;}",
++                    ),
++                    ("app/Composer.php", composer),
++                    (
++                        "vendor/illuminate/Foundation/Application.php",
++                        APPLICATION_CLASS,
++                    ),
++                    ("resources/views/profile.blade.php", template),
++                    ("resources/views/other.blade.php", template),
++                ],
++            );
++            let uri =
++                open_initialized_blade_template(&backend, "resources/views/profile.blade.php")
++                    .await;
++            for (target, uri) in [
++                ("profile", uri),
++                (
++                    "other",
++                    open_blade_template(&backend, "resources/views/other.blade.php").await,
++                ),
++            ] {
++                let expected =
++                    case["expected"] == true && (target == "profile" || case["scope"] == "shared");
++                let labels = crate::common::complete_labels_at_opened(&backend, &uri, 1, 12).await;
++                assert_eq!(
++                    labels.iter().any(|name| name == "itemOnly"),
++                    expected,
++                    "{} {target}: {labels:?}",
++                    case["name"]
++                );
++                assert!(
++                    !labels.iter().any(|name| name == "otherOnly"),
++                    "{} must ignore the scalar value when key is an array",
++                    case["name"]
++                );
++                let targets = crate::common::definition_locations(
++                    crate::common::goto_definition_at(&backend, &uri, 1, 12).await,
++                );
++                if expected {
++                    let before = &model[..model.find("$itemOnly").unwrap() + 1];
++                    let point = tower_lsp::lsp_types::Position::new(
++                        2,
++                        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++                    );
++                    assert_eq!(targets.len(), 1, "{} {target}: {targets:?}", case["name"]);
++                    assert_eq!(
++                        targets[0].uri,
++                        tower_lsp::lsp_types::Url::from_file_path(dir.path().join("app/Item.php"))
++                            .unwrap()
++                    );
++                    assert_eq!(
++                        targets[0].range,
++                        tower_lsp::lsp_types::Range::new(point, point)
++                    );
++                } else {
++                    assert!(targets.is_empty(), "{} {target}: {targets:?}", case["name"]);
++                }
++            }
++        }
++    }
+ }
+--- /dev/null
++++ b/tests/integration/fixtures/named_view_provider_arguments.json
+@@ -0,0 +1,184 @@
++[
++  {
++    "name": "share_positional",
++    "call": "View::share('item', new \\App\\Item());",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_named_ordered",
++    "call": "View::share(key:'item', value:new \\App\\Item());",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_named_reordered",
++    "call": "View::share(value:new \\App\\Item(), key:'item');",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_mixed",
++    "call": "View::share('item', value:new \\App\\Item());",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_named_array",
++    "call": "View::share(key:['item'=>new \\App\\Item()]);",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_array_ignored_value",
++    "call": "View::share(value:new \\App\\Other(), key:['item'=>new \\App\\Item()]);",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_positional_array_ignored_value",
++    "call": "View::share(['item'=>new \\App\\Item()], new \\App\\Other());",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_container_named",
++    "call": "$this->app['view']->share(value:new \\App\\Item(), key:'item');",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_factory_named",
++    "call": "view()->share(value:new \\App\\Item(), key:'item');",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_resolved_named",
++    "call": "$this->app->make('view')->share(value:new \\App\\Item(), key:'item');",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_qualified_named",
++    "call": "\\Illuminate\\Support\\Facades\\View::share(value:new \\App\\Item(), key:'item');",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_positional",
++    "call": "View::composer('profile', function ($view) { $view->with('item', new \\App\\Item()); });",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_named_ordered",
++    "call": "View::composer(views:'profile', callback:function ($view) { $view->with('item', new \\App\\Item()); });",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_named_reordered",
++    "call": "View::composer(callback:function ($view) { $view->with('item', new \\App\\Item()); }, views:'profile');",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_class_named_reordered",
++    "call": "View::composer(callback:\\App\\Composer::class, views:'profile');",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_with_named_ordered",
++    "call": "View::composer('profile', function ($view) { $view->with(key:'item', value:new \\App\\Item()); });",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_with_named_reordered",
++    "call": "View::composer('profile', function ($view) { $view->with(value:new \\App\\Item(), key:'item'); });",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_with_array_ignored_value",
++    "call": "View::composer('profile', function ($view) { $view->with(value:new \\App\\Other(), key:['item'=>new \\App\\Item()]); });",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composers_named_table",
++    "call": "View::composers(composers:[\\App\\Composer::class=>'profile']);",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_extra_positional",
++    "call": "View::share('item', new \\App\\Item(), new \\App\\Other());",
++    "scope": "shared",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "composer_extra_positional",
++    "call": "View::composer('profile', function ($view) { $view->with('item', new \\App\\Item()); }, new \\App\\Other());",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "with_extra_positional",
++    "call": "View::composer('profile', function ($view) { $view->with('item', new \\App\\Item(), new \\App\\Other()); });",
++    "scope": "composer",
++    "runtime_error": false,
++    "expected": true
++  },
++  {
++    "name": "share_unknown_named",
++    "call": "View::share(key:'item', invalid:new \\App\\Item());",
++    "scope": "shared",
++    "runtime_error": true,
++    "expected": false
++  },
++  {
++    "name": "share_wrong_case_named",
++    "call": "View::share(Key:'item', value:new \\App\\Item());",
++    "scope": "shared",
++    "runtime_error": true,
++    "expected": false
++  },
++  {
++    "name": "composer_unknown_named",
++    "call": "View::composer(views:'profile', handler:function ($view) { $view->with('item', new \\App\\Item()); });",
++    "scope": "composer",
++    "runtime_error": true,
++    "expected": false
++  },
++  {
++    "name": "with_unknown_named",
++    "call": "View::composer('profile', function ($view) { $view->with(key:'item', invalid:new \\App\\Item()); });",
++    "scope": "composer",
++    "runtime_error": true,
++    "expected": false
++  }
++]

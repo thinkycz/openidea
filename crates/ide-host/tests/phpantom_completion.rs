@@ -27,6 +27,9 @@ mod kernel_aliases;
 #[path = "fixtures/middleware_aliases.rs"]
 mod middleware_aliases;
 #[cfg(unix)]
+#[path = "fixtures/provider_view_arguments.rs"]
+mod provider_view_arguments;
+#[cfg(unix)]
 #[path = "fixtures/translation_navigation.rs"]
 mod translation_navigation;
 

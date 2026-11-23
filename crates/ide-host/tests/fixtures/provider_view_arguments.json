@@ -1,0 +1,184 @@
+[
+  {
+    "name": "share_positional",
+    "call": "View::share('item', new \\App\\Item());",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_named_ordered",
+    "call": "View::share(key:'item', value:new \\App\\Item());",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_named_reordered",
+    "call": "View::share(value:new \\App\\Item(), key:'item');",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_mixed",
+    "call": "View::share('item', value:new \\App\\Item());",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_named_array",
+    "call": "View::share(key:['item'=>new \\App\\Item()]);",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_array_ignored_value",
+    "call": "View::share(value:new \\App\\Other(), key:['item'=>new \\App\\Item()]);",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_positional_array_ignored_value",
+    "call": "View::share(['item'=>new \\App\\Item()], new \\App\\Other());",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_container_named",
+    "call": "$this->app['view']->share(value:new \\App\\Item(), key:'item');",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_factory_named",
+    "call": "view()->share(value:new \\App\\Item(), key:'item');",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_resolved_named",
+    "call": "$this->app->make('view')->share(value:new \\App\\Item(), key:'item');",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_qualified_named",
+    "call": "\\Illuminate\\Support\\Facades\\View::share(value:new \\App\\Item(), key:'item');",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_positional",
+    "call": "View::composer('profile', function ($view) { $view->with('item', new \\App\\Item()); });",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_named_ordered",
+    "call": "View::composer(views:'profile', callback:function ($view) { $view->with('item', new \\App\\Item()); });",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_named_reordered",
+    "call": "View::composer(callback:function ($view) { $view->with('item', new \\App\\Item()); }, views:'profile');",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_class_named_reordered",
+    "call": "View::composer(callback:\\App\\Composer::class, views:'profile');",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_with_named_ordered",
+    "call": "View::composer('profile', function ($view) { $view->with(key:'item', value:new \\App\\Item()); });",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_with_named_reordered",
+    "call": "View::composer('profile', function ($view) { $view->with(value:new \\App\\Item(), key:'item'); });",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_with_array_ignored_value",
+    "call": "View::composer('profile', function ($view) { $view->with(value:new \\App\\Other(), key:['item'=>new \\App\\Item()]); });",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composers_named_table",
+    "call": "View::composers(composers:[\\App\\Composer::class=>'profile']);",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_extra_positional",
+    "call": "View::share('item', new \\App\\Item(), new \\App\\Other());",
+    "scope": "shared",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "composer_extra_positional",
+    "call": "View::composer('profile', function ($view) { $view->with('item', new \\App\\Item()); }, new \\App\\Other());",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "with_extra_positional",
+    "call": "View::composer('profile', function ($view) { $view->with('item', new \\App\\Item(), new \\App\\Other()); });",
+    "scope": "composer",
+    "runtime_error": false,
+    "expected": true
+  },
+  {
+    "name": "share_unknown_named",
+    "call": "View::share(key:'item', invalid:new \\App\\Item());",
+    "scope": "shared",
+    "runtime_error": true,
+    "expected": false
+  },
+  {
+    "name": "share_wrong_case_named",
+    "call": "View::share(Key:'item', value:new \\App\\Item());",
+    "scope": "shared",
+    "runtime_error": true,
+    "expected": false
+  },
+  {
+    "name": "composer_unknown_named",
+    "call": "View::composer(views:'profile', handler:function ($view) { $view->with('item', new \\App\\Item()); });",
+    "scope": "composer",
+    "runtime_error": true,
+    "expected": false
+  },
+  {
+    "name": "with_unknown_named",
+    "call": "View::composer('profile', function ($view) { $view->with(key:'item', invalid:new \\App\\Item()); });",
+    "scope": "composer",
+    "runtime_error": true,
+    "expected": false
+  }
+]

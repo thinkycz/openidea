@@ -15,6 +15,60 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 254 (accepted source/client; provider argument bindings and Blade freshness):
+PHPantom now binds share/composer/composers and composer with-body arguments by
+PHP parameter slots. Preserve case-sensitive names, value-expression offsets,
+composer target scope and extra positional arguments. Array-key entries win over
+an ignored scalar value; unknown named parameters infer no false model data.
+Static inspection executes no project PHP. Owned PHP 8.4.23/Laravel 13.37 fixtures
+verify 26 registration forms: 22 valid / four runtime parameter errors, 156 syntax
+checks and 52 template observations (34 positive / 18 scoped or invalid controls).
+Baseline 201 gets 27/52 completion/declaration pairs right (19 misses / six false
+claims); signed 203 gets all 52 pairs and positive property hovers right. The unit
+RED fails on reordered share binding; parser-to-template GREEN checks exact UTF16
+member coordinates. Inactive 202 passes static checks but fails lifecycle acceptance.
+
+Actual Host checks on both 201 and 202 expose an inherited positional-share
+freshness defect before reaching reordered-argument cases; these failures are not
+claimed as the intended named-binding RED. A new engine regression reproduces an
+unsaved class-composer change returning old User/email instead of Menu/items().
+Provider/list changes now refresh already-lowered templates; composer bodies target
+their registered view patterns. Admit old targets when accepting changes,
+retain removed edges and use the existing guarded refresh graph. Resolved provider
+variables invalidate with generation receipts so old builders cannot restore cache
+entries. Preserve existing close-publication ownership and stale-callback retirement;
+duplicate close is covered.
+The engine regression verifies composer replacement, registration removal, provider
+and composer discard without template edits. The actual Host corpus checks all 26
+forms, dirty Unicode views/providers/composers, old member retirement, exact origins,
+restart replay, invalid bindings, discard and unchanged disk/retained dirty caller.
+
+All 148 actual client/Host cases (75/73; completion 58), three normal formatter
+regressions and 23 controlled-browser cases pass. Fresh engine gates pass 18,766
+main / 17 ignored / two isolated children, both strict release Clippy modes, format,
+source fingerprint and build. Root source hashes verify reuse of this slice's
+5,897 Rust / 277 ignored / same 13 filtered / strict workspace Clippy and 15,436
+frontend / 11 skips / types / lint / format / Knip / build / Safari gates. The 13
+exclusions remain 11 established plus two pending synthetic-env worktree tests.
+Provenance tests and all 203 patch checks pass. Compiler profiles retain test
+assertions and overflow checks. No Root implementation or request deadline changed.
+
+Candidate 203 remains inactive/unbundled. Sole App 0.1.130/default 201 is unchanged
+and deep/strict signed verification passes. Cleanup removed 18.2 GiB of Root
+compiler output, frontend dist and 2,533,571,636 bytes of engine compiler output,
+scratch and abandoned source copies. Retain the latest seven regression executables. Preserve Workbench, canonical
+accepted sources/engines, licenses/provenance, earlier evidence and both original
+stashes. Native GUI remains user-skipped. Package 203 before claiming default-app
+adoption. Nested closures/shadowing, omitted defaults, dynamic/unpacked bindings,
+indirect dependencies, wider cache/index concurrency and performance/native/service
+matrices remain partial. All 69 areas remain 67 partial / two debugger user-deferred.
+
+Candidate 203 SHA256: 284d4c1eabfbf0dd91531b261eb78374db0ebca586fb64bf0b643646d79a06c4.
+Source fingerprint: 4a01728f027f96cd51d40af6c07323ad656e280f91338c01c373365b8632bb6a.
+Evidence: artifacts/checks/slice254/{engine-red-inputs,freeze203,engine203-gates,
+freshness-baseline,probe-201,probe-203,evaluation,after203,retention,acceptance,
+delivery}.json; engine203-red.log / engine203-focused.log.
+
 Package slice 253 (local development App 0.1.130 accepted):
 Bundle exact signed PHPantom 201 with source 251 trait accessor declaration origins
 and source 252 virtual-property rename guards. Only four version files and three

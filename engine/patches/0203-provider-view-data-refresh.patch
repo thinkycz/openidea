@@ -1,0 +1,308 @@
+--- a/src/blade/shared_vars.rs
++++ b/src/blade/shared_vars.rs
+@@ -44,6 +44,66 @@
+ }
+ 
+ impl Backend {
++    pub(crate) fn invalidate_blade_shared_vars(&self) {
++        let mut cache = self.laravel_string_key_cache.write();
++        cache.shared_view_vars = None;
++        cache.shared_view_vars_generation = Arc::new(());
++    }
++
++    /// Provider registrations may retarget any lowered view. Composer bodies
++    /// affect the patterns of their current registrations only.
++    pub(crate) fn blade_provider_dependency_targets(
++        &self,
++        uri: &str,
++    ) -> std::collections::HashSet<String> {
++        if self.is_blade_file(uri) || !self.laravel_provider_scans.read().is_built() {
++            return Default::default();
++        }
++        let mut aliases = self.symbols.source_authority.aliases(uri);
++        aliases.insert(uri.to_owned());
++        let provider = self.is_laravel_provider_list_uri(uri)
++            || self
++                .laravel_provider_scans
++                .read()
++                .scans_for_uris(&aliases)
++                .next()
++                .is_some();
++        let patterns: Vec<String> = if provider {
++            Vec::new()
++        } else {
++            let resources = self.laravel_provider_resources.read();
++            let index = self.symbols.fqn_uri_index.read();
++            let patterns: Vec<_> = resources
++                .view_composers
++                .iter()
++                .filter(|composer| {
++                    composer
++                        .class
++                        .as_ref()
++                        .and_then(|class| index.get(class.trim_start_matches('\\')))
++                        .is_some_and(|source| aliases.contains(source))
++                })
++                .flat_map(|composer| composer.views.iter().cloned())
++                .collect();
++            if patterns.is_empty() {
++                return Default::default();
++            }
++            patterns
++        };
++        let lowered: Vec<_> = self.blade_virtual_content.read().keys().cloned().collect();
++        lowered
++            .into_iter()
++            .filter(|target| {
++                provider
++                    || self.view_names_for_blade_uri(target).iter().any(|name| {
++                        patterns
++                            .iter()
++                            .any(|pattern| view_pattern_matches(pattern, name))
++                    })
++            })
++            .collect()
++    }
++
+     /// The variables a service provider puts in the scope of a template
+     /// addressable as any of `view_names`.
+     pub(crate) fn blade_provider_vars(&self, view_names: &[String]) -> InjectedVars {
+@@ -108,8 +168,21 @@
+         {
+             return cached;
+         }
++        let input = self.diag.documents.lock().input_epoch();
++        let generation = Arc::clone(
++            &self
++                .laravel_string_key_cache
++                .read()
++                .shared_view_vars_generation,
++        );
+         let groups = Arc::new(self.build_shared_var_groups());
+-        self.laravel_string_key_cache.write().shared_view_vars = Some(Arc::clone(&groups));
++        let documents = self.diag.documents.lock();
++        let mut cache = self.laravel_string_key_cache.write();
++        if documents.input_matches(&input)
++            && Arc::ptr_eq(&generation, &cache.shared_view_vars_generation)
++        {
++            cache.shared_view_vars = Some(Arc::clone(&groups));
++        }
+         groups
+     }
+ 
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1946,7 +1946,7 @@
+                 }
+             }
+         }
+-        let mut targets = HashSet::new();
++        let mut targets = self.blade_provider_dependency_targets(uri);
+         for name in names {
+             for location in crate::virtual_members::laravel::resolve_laravel_string_key(
+                 self,
+@@ -2469,6 +2469,12 @@
+             (work.targets.iter().cloned().collect::<Vec<_>>(), epoch)
+         };
+         if epoch.current(self) {
++            // Provider and class-composer expressions must resolve against the
++            // accepted source before dependent scopes are staged. Retained old
++            // targets also cover removed declarations and registrations.
++            if !roots.is_empty() && !self.is_blade_file(caller) {
++                self.invalidate_blade_shared_vars();
++            }
+             // Notification admission fences the source parse; each actual
+             // scope/AST commit owns its publication fence. Planning a retained
+             // unsupported component must not retire unrelated read snapshots.
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -167,11 +167,11 @@
+         // Each change event either has a range (incremental) or replaces
+         // the entire document (range is None).
+         let before = self.open_files.read().get(&uri).cloned();
++        let old_targets =
++            self.capture_blade_dependency_targets(&uri, before.as_deref().map(String::as_str));
+         let source_only_change = !self.is_blade_file(&uri)
+             && !crate::resource_navigation::is_forwarded_resource_document(&uri)
+-            && self
+-                .capture_blade_dependency_targets(&uri, before.as_deref().map(String::as_str))
+-                .is_empty();
++            && old_targets.is_empty();
+         let text = {
+             let mut current = before.as_ref().map(|s| s.to_string()).unwrap_or_default();
+ 
+@@ -203,6 +203,7 @@
+             if !crate::resource_navigation::is_forwarded_resource_document(&uri) {
+                 let mut pending = self.blade_pending_refreshes.lock();
+                 let work = pending.entry(uri.clone()).or_default();
++                work.targets.extend(old_targets);
+                 source_only_change &= work.targets.is_empty();
+                 if work.before.is_none() {
+                     work.before = before;
+--- a/src/backend/laravel/provider_resources.rs
++++ b/src/backend/laravel/provider_resources.rs
+@@ -138,7 +138,7 @@
+         // The shared and composed template variables are resolved from these
+         // registrations, so the previous scan's set is stale whether or not
+         // any other resource count moved.
+-        self.laravel_string_key_cache.write().shared_view_vars = None;
++        self.invalidate_blade_shared_vars();
+ 
+         if has_string_key_sources {
+             let mut cache = self.laravel_string_key_cache.write();
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -446,6 +446,7 @@
+     /// because every Blade template reads the whole set to pick the groups
+     /// that reach it.
+     pub shared_view_vars: Option<std::sync::Arc<Vec<crate::blade::shared_vars::SharedVarGroup>>>,
++    pub shared_view_vars_generation: Arc<()>,
+     /// Every authorization ability the project knows: `Gate::define()`
+     /// registrations plus the methods of every policy class, sorted.
+     pub gate_abilities: Option<std::sync::Arc<[String]>>,
+--- a/tests/integration/blade_shared_vars.rs
++++ b/tests/integration/blade_shared_vars.rs
+@@ -26,7 +26,7 @@
+     const PROVIDERS_PHP: &str =
+         "<?php\nreturn [\n    App\\Providers\\ViewServiceProvider::class,\n];\n";
+ 
+-    const VIEW_SERVICE_PROVIDER: &str = r#"<?php
++    pub(super) const VIEW_SERVICE_PROVIDER: &str = r#"<?php
+ namespace App\Providers;
+ 
+ use App\Support\Menu;
+@@ -53,7 +53,7 @@
+ }
+ "#;
+ 
+-    const PROFILE_COMPOSER: &str = r#"<?php
++    pub(super) const PROFILE_COMPOSER: &str = r#"<?php
+ namespace App\View\Composers;
+ 
+ use App\Models\User;
+@@ -71,7 +71,9 @@
+     const APPLICATION_CLASS: &str =
+         "<?php\nnamespace Illuminate\\Foundation;\nclass Application {}\n";
+ 
+-    fn workspace(templates: &[(&str, &str)]) -> (phpantom_lsp::Backend, tempfile::TempDir) {
++    pub(super) fn workspace(
++        templates: &[(&str, &str)],
++    ) -> (phpantom_lsp::Backend, tempfile::TempDir) {
+         let mut files = vec![
+             ("bootstrap/providers.php", PROVIDERS_PHP),
+             (
+@@ -543,3 +545,114 @@
+         }
+     }
+ }
++
++#[tokio::test]
++async fn provider_view_data_refreshes_without_template_edits() {
++    use crate::common::{complete_labels_at_opened, open_php, position_after};
++    use tower_lsp::{LanguageServer, lsp_types::*};
++    const TEMPLATE: &str = "{{-- 😀 --}}\n{{ $user-> }}\n";
++    let (backend, dir) = tests::workspace(&[("resources/views/profile.blade.php", TEMPLATE)]);
++    let provider =
++        Url::from_file_path(dir.path().join("app/Providers/ViewServiceProvider.php")).unwrap();
++    let composer =
++        Url::from_file_path(dir.path().join("app/View/Composers/ProfileComposer.php")).unwrap();
++    let profile = crate::common::open_initialized_blade_template(
++        &backend,
++        "resources/views/profile.blade.php",
++    )
++    .await;
++    open_php(&backend, &provider, tests::VIEW_SERVICE_PROVIDER).await;
++    open_php(&backend, &composer, tests::PROFILE_COMPOSER).await;
++    async fn labels(backend: &phpantom_lsp::Backend, uri: &Url) -> Vec<String> {
++        let pos = position_after(TEMPLATE, "$user->");
++        complete_labels_at_opened(backend, uri, pos.line, pos.character).await
++    }
++    assert!(
++        labels(&backend, &profile)
++            .await
++            .iter()
++            .any(|v| v == "email")
++    );
++    let changed = tests::PROFILE_COMPOSER.replace("new User()", "new \\App\\Support\\Menu()");
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: composer.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed,
++            }],
++        })
++        .await;
++    let current = labels(&backend, &profile).await;
++    assert!(
++        current.iter().any(|v| v == "items()"),
++        "dirty composer: {current:?}"
++    );
++    assert!(!current.iter().any(|v| v == "email"));
++    let removed = tests::VIEW_SERVICE_PROVIDER
++        .replace("View::composer('profile', ProfileComposer::class);", "");
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: provider.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: removed,
++            }],
++        })
++        .await;
++    let current = labels(&backend, &profile).await;
++    assert!(
++        !current.iter().any(|v| v == "items()" || v == "email"),
++        "removed registration: {current:?}"
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: provider.clone(),
++            },
++        })
++        .await;
++    assert!(
++        labels(&backend, &profile)
++            .await
++            .iter()
++            .any(|v| v == "items()")
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: composer.clone(),
++            },
++        })
++        .await;
++    let current = labels(&backend, &profile).await;
++    assert!(
++        current.iter().any(|v| v == "email"),
++        "discarded composer: {current:?}"
++    );
++    assert!(!current.iter().any(|v| v == "items()"));
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: provider },
++        })
++        .await;
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: composer },
++        })
++        .await;
++    assert!(
++        labels(&backend, &profile)
++            .await
++            .iter()
++            .any(|v| v == "email")
++    );
++}
